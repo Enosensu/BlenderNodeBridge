@@ -1,10 +1,10 @@
 bl_info = {
-    "name": "GeoNeural Bridge (v2.5.2 Smart-Frame)",
+    "name": "GeoNeural Bridge (v2.5.5 Isolation-Safe)",
     "author": "Dev_Nodes_V5",
-    "version": (2, 5, 2),
+    "version": (2, 5, 5),
     "blender": (4, 0, 0),
     "location": "Node Editor > Sidebar > GeoNeural",
-    "description": "Fixed Frame overlap by auto-calculating centroids for parenting.",
+    "description": "Final Logic: Auto-Layout, Smart-Frame Centering, and Isolation Protection.",
     "category": "Node",
 }
 
@@ -232,7 +232,7 @@ def serialize_recursive(start_tree, selected_only=False, is_compact=False):
             if n.bl_idname in GROUP_TYPES and n.node_tree:
                 if n.node_tree not in scanned_trees: trees_to_scan.add(n.node_tree)
 
-    return { "version": "2.5.2", "compact": is_compact, "root": root_data, "dependencies": deps }
+    return { "version": "2.5.5", "compact": is_compact, "root": root_data, "dependencies": deps }
 
 # ==============================================================================
 # 3. Core Logic: Smart Build & Auto-Layout
@@ -258,7 +258,6 @@ def rebuild_interface(node_tree, interface_data):
         except: pass
 
 def apply_hierarchical_layout(node_tree, new_nodes):
-    """ Fallback layout if NO coordinates exist at all. """
     if not new_nodes: return
     node_map = {n.name: n for n in new_nodes}
     children = {n.name: [] for n in new_nodes}
@@ -309,7 +308,10 @@ def build_single_tree(node_tree, data, offset=(0,0), clear=False, conversion_log
     if clear: node_tree.nodes.clear()
     node_map = {}
     created_nodes = []
-    has_valid_location = False 
+    has_valid_location = False
+    
+    # [NEW] Track nodes that came with explicit coordinates
+    explicit_loc_nodes = set()
     
     target_tree_type = node_tree.bl_idname
     translation_map = NODE_TRANSLATION_TABLE.get(target_tree_type, {})
@@ -358,6 +360,8 @@ def build_single_tree(node_tree, data, offset=(0,0), clear=False, conversion_log
             
             if loc and isinstance(loc, list) and len(loc) == 2:
                 node.location = (loc[0] + offset[0], loc[1] + offset[1])
+                # [NEW] Mark this node as having an explicit location
+                explicit_loc_nodes.add(node)
                 if loc[0] != 0 or loc[1] != 0: has_valid_location = True
             else:
                 node.location = (0, 0)
@@ -405,35 +409,42 @@ def build_single_tree(node_tree, data, offset=(0,0), clear=False, conversion_log
                 try: child_node.parent = parent_node
                 except: pass
 
-    # 3. [NEW] Implicit Parenting & Frame Centering
-    # AI often outputs frames as headers (Frame -> Nodes) but misses parent links and frame coordinates.
+    # 3. Implicit Parenting (Isolation Safe Strategy)
+    frames = [n for n in created_nodes if n.bl_idname == 'NodeFrame']
+    frames_with_implicit_children = {f: [] for f in frames}
     current_implicit_frame = None
-    frames_with_implicit_children = {} # {frame_node: [children]}
 
-    # Pass A: Infer Parenting from List Order
+    # Strategy A: Linear Scan (Interleaved)
     for node in created_nodes:
         if node.bl_idname == 'NodeFrame':
             current_implicit_frame = node
-            frames_with_implicit_children[node] = []
         elif current_implicit_frame and node.parent is None:
-            # If node has no explicit parent, assume it belongs to the preceding frame
+            # Linear scan assumes intended grouping if no explicit location given or if close
+            # But for safety, strictly speaking linear scan is usually for compact mode.
+            # We apply it here.
             node.parent = current_implicit_frame
             frames_with_implicit_children[current_implicit_frame].append(node)
     
-    # Pass B: Reposition Frames to Centroid (Fix Overlap)
+    # Strategy B: Single Frame Catch-All (Isolation Safe)
+    # Only if 1 frame exists, and nodes have NO parent AND NO explicit location.
+    if len(frames) == 1:
+        single_frame = frames[0]
+        for node in created_nodes:
+            if node.bl_idname != 'NodeFrame' and node.parent is None:
+                # [FIX] Critical check: Only adopt if node did NOT have explicit coords
+                if node not in explicit_loc_nodes:
+                    node.parent = single_frame
+                    frames_with_implicit_children[single_frame].append(node)
+    
+    # Pass C: Reposition Frames to Centroid
     for frame, children in frames_with_implicit_children.items():
-        # Only touch frames that are at (0,0) (likely undefined by AI) and have children
-        if frame.location.x == 0 and frame.location.y == 0 and children:
-            # Calculate Centroid
+        if children:
             avg_x = sum(n.location.x for n in children) / len(children)
             avg_y = sum(n.location.y for n in children) / len(children)
             
-            # Move Frame to Center
             frame.location.x = avg_x
             frame.location.y = avg_y
             
-            # Important: Compensate children so they don't move visually
-            # (Parenting to a moved frame shifts children if local coords aren't updated)
             for child in children:
                 child.location.x -= avg_x
                 child.location.y -= avg_y
@@ -469,7 +480,6 @@ def build_single_tree(node_tree, data, offset=(0,0), clear=False, conversion_log
                 print(f"Link Error: {e}")
 
     # 5. Global Auto Layout Trigger
-    # Only if absolutely no valid locations were found (e.g. pure logic graph)
     if not has_valid_location and len(created_nodes) > 1:
         apply_hierarchical_layout(node_tree, created_nodes)
 
@@ -549,7 +559,7 @@ class GN_OT_Build(bpy.types.Operator):
         return {'FINISHED'}
 
 class GN_PT_Panel(bpy.types.Panel):
-    bl_label = "GeoNeural v2.5.2 (Smart-Frame)"
+    bl_label = "GeoNeural v2.5.5 (Isolation-Safe)"
     bl_idname = "GN_PT_main"
     bl_space_type = 'NODE_EDITOR' 
     bl_region_type = 'UI'
