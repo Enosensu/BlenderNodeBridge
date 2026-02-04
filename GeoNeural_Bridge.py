@@ -1,10 +1,10 @@
 bl_info = {
-    "name": "GeoNeural Bridge (v2.1.0)",
+    "name": "GeoNeural Bridge (v2.5.2 Smart-Frame)",
     "author": "Dev_Nodes_V5",
-    "version": (2, 1, 0),
-    "blender": (5, 0, 0),
+    "version": (2, 5, 2),
+    "blender": (4, 0, 0),
     "location": "Node Editor > Sidebar > GeoNeural",
-    "description": "Single-file edition: Smart AI Bridge with embedded mappings",
+    "description": "Fixed Frame overlap by auto-calculating centroids for parenting.",
     "category": "Node",
 }
 
@@ -12,14 +12,10 @@ import bpy
 import json
 
 # ==============================================================================
-# 0. 内嵌映射数据库 (Embedded Mapping Database)
+# 0. Embedded Mapping Database (Updated for Blender 4.0+)
 # ==============================================================================
-# 这里包含了 Blender 5.0 常用节点的跨上下文转换规则。
-# 由于是 Python 字典，你可以直接在这里修改或添加新的映射。
-
 NODE_TRANSLATION_TABLE = {
     "GeometryNodeTree": {
-        # --- Shader -> GeoNodes ---
         "ShaderNodeTexNoise": "GeometryNodeInputNoiseTexture",
         "ShaderNodeTexVoronoi": "GeometryNodeInputVoronoiTexture",
         "ShaderNodeTexWave": "GeometryNodeInputWaveTexture",
@@ -28,7 +24,6 @@ NODE_TRANSLATION_TABLE = {
         "ShaderNodeTexGradient": "GeometryNodeInputGradientTexture",
         "ShaderNodeTexWhiteNoise": "GeometryNodeInputWhiteNoise",
         "ShaderNodeTexBrick": "GeometryNodeInputBrickTexture",
-        
         "ShaderNodeMath": "ShaderNodeMath",
         "ShaderNodeVectorMath": "ShaderNodeVectorMath",
         "ShaderNodeMix": "ShaderNodeMix",
@@ -39,23 +34,20 @@ NODE_TRANSLATION_TABLE = {
         "ShaderNodeClamp": "GeometryNodeClamp",
         "ShaderNodeRGB": "GeometryNodeInputRGB",
         "ShaderNodeValue": "GeometryNodeInputValue",
-        
         "ShaderNodeCombineXYZ": "ShaderNodeCombineXYZ",
         "ShaderNodeSeparateXYZ": "ShaderNodeSeparateXYZ",
         "ShaderNodeCombineRGB": "ShaderNodeCombineRGB",
         "ShaderNodeSeparateRGB": "ShaderNodeSeparateRGB",
         "ShaderNodeCombineColor": "ShaderNodeCombineColor",
         "ShaderNodeSeparateColor": "ShaderNodeSeparateColor",
-        
         "ShaderNodeNewGeometry": "GeometryNodeInputPosition",
-        "ShaderNodeUVMap": "GeometryNodeInputNamedAttribute", # 通常用于UV
+        "ShaderNodeUVMap": "GeometryNodeInputNamedAttribute",
         "ShaderNodeObjectInfo": "GeometryNodeObjectInfo",
         "ShaderNodeAttribute": "GeometryNodeInputNamedAttribute",
-        "ShaderNodeNormal": "GeometryNodeInputNormal"
+        "ShaderNodeNormal": "GeometryNodeInputNormal",
+        "GeometryNodeEndpointSelection": "GeometryNodeCurveEndpointSelection"
     },
-    
     "ShaderNodeTree": {
-        # --- GeoNodes -> Shader ---
         "GeometryNodeInputNoiseTexture": "ShaderNodeTexNoise",
         "GeometryNodeInputVoronoiTexture": "ShaderNodeTexVoronoi",
         "GeometryNodeInputWaveTexture": "ShaderNodeTexWave",
@@ -64,7 +56,6 @@ NODE_TRANSLATION_TABLE = {
         "GeometryNodeInputGradientTexture": "ShaderNodeTexGradient",
         "GeometryNodeInputWhiteNoise": "ShaderNodeTexWhiteNoise",
         "GeometryNodeInputBrickTexture": "ShaderNodeTexBrick",
-        
         "GeometryNodeMath": "ShaderNodeMath",
         "GeometryNodeVectorMath": "ShaderNodeVectorMath",
         "GeometryNodeMix": "ShaderNodeMix",
@@ -77,7 +68,6 @@ NODE_TRANSLATION_TABLE = {
         "GeometryNodeInputValue": "ShaderNodeValue",
         "FunctionNodeInputBool": "ShaderNodeValue",
         "FunctionNodeInputInt": "ShaderNodeValue",
-        
         "GeometryNodeInputPosition": "ShaderNodeNewGeometry",
         "GeometryNodeInputNormal": "ShaderNodeNewGeometry",
         "GeometryNodeInputTangent": "ShaderNodeNewGeometry",
@@ -85,9 +75,7 @@ NODE_TRANSLATION_TABLE = {
         "GeometryNodeObjectInfo": "ShaderNodeObjectInfo",
         "GeometryNodeInputNamedAttribute": "ShaderNodeAttribute"
     },
-
     "CompositorNodeTree": {
-        # --- Universal -> Compositor ---
         "ShaderNodeMath": "CompositorNodeMath",
         "GeometryNodeMath": "CompositorNodeMath",
         "ShaderNodeVectorMath": "CompositorNodeVectorMath",
@@ -103,23 +91,30 @@ NODE_TRANSLATION_TABLE = {
 }
 
 # ==============================================================================
-# 1. 工具：通用数据清洗
+# 1. Utility: Data Cleaning
 # ==============================================================================
 
 def clean_data(value):
-    """白名单清洗，确保 JSON 安全"""
     if value is None: return None
+    if isinstance(value, bpy.types.ID):
+        return value.name
     if isinstance(value, (int, float, str, bool)):
-        if isinstance(value, float): return round(value, 3)
+        if isinstance(value, float): return round(value, 4)
         return value
-    if hasattr(value, "to_list"): return [round(x, 3) for x in value.to_list()]
-    if hasattr(value, "to_tuple"): return [round(x, 3) for x in value.to_tuple()]
+    if hasattr(value, "to_list"): return [clean_data(x) for x in value.to_list()]
+    if hasattr(value, "to_tuple"): return [clean_data(x) for x in value.to_tuple()]
     if isinstance(value, (list, tuple)): return [clean_data(x) for x in value]
     if isinstance(value, dict): return {k: clean_data(v) for k, v in value.items()}
     return None
 
+def get_socket_index(node_sockets, target_socket):
+    for i, s in enumerate(node_sockets):
+        if s == target_socket:
+            return i
+    return -1
+
 # ==============================================================================
-# 2. 核心逻辑：序列化
+# 2. Core Logic: Serialization
 # ==============================================================================
 
 def serialize_interface(node_tree):
@@ -139,28 +134,50 @@ def serialize_interface(node_tree):
                 interface_data.append(socket_info)
     return interface_data
 
-def serialize_single_tree(node_tree, nodes_to_process=None):
+def serialize_single_tree(node_tree, nodes_to_process=None, is_compact=False):
     if nodes_to_process is None: nodes_to_process = node_tree.nodes
     data = { "tree_type": node_tree.bl_idname, "nodes": [], "links": [] }
     valid_names = {n.name for n in nodes_to_process}
     GROUP_TYPES = {'GeometryNodeGroup', 'ShaderNodeGroup', 'CompositorNodeGroup'}
 
+    ALWAYS_EXCLUDE = {'rna_type', 'node_tree', 'inputs', 'outputs', 'interface', 'dimensions'}
+    COMPACT_EXCLUDE = {
+        'name', 'location', 'width', 'height', 'select', 'color', 
+        'label', 'hide', 'mute', 'use_custom_color', 'location_absolute', 
+        'warning_propagation', 'color_tag', 'parent', 'width_hidden'
+    }
+    COMPACT_PREFIX_EXCLUDE = ('bl_', 'show_', '_')
+
     for node in nodes_to_process:
-        if node.bl_idname == 'NodeFrame': continue
+        node_type = node.bl_idname
         node_data = {
             "name": node.name,
-            "type": node.bl_idname,
-            "location": [int(node.location.x), int(node.location.y)],
-            "params": {}, "inputs": {}
+            "type": node_type,
+            "params": {}, 
+            "inputs": {}
         }
+        
+        if not is_compact:
+            if node.parent:
+                node_data["parent"] = node.parent.name
+            node_data["location"] = [int(node.location.x), int(node.location.y)]
+            if node.bl_idname == 'NodeFrame':
+                node_data["width"] = node.width
+                node_data["height"] = node.height
+
         if node.bl_idname in GROUP_TYPES and node.node_tree:
             node_data["node_tree_name"] = node.node_tree.name
 
         for prop in node.bl_rna.properties.keys():
-            if prop in {'rna_type', 'name', 'location', 'width', 'height', 'select', 'dimensions', 'color', 'inputs', 'outputs', 'node_tree'}: continue
+            if prop in ALWAYS_EXCLUDE: continue
+            if is_compact:
+                if prop in COMPACT_EXCLUDE: continue
+                if prop.startswith(COMPACT_PREFIX_EXCLUDE): continue
+            
             try:
                 safe_val = clean_data(getattr(node, prop))
-                if safe_val is not None: node_data["params"][prop] = safe_val
+                if safe_val is not None: 
+                    node_data["params"][prop] = safe_val
             except: pass
 
         for socket in node.inputs:
@@ -174,19 +191,28 @@ def serialize_single_tree(node_tree, nodes_to_process=None):
 
     for link in node_tree.links:
         if link.from_node.name in valid_names and link.to_node.name in valid_names:
-            data["links"].append({
-                "src": link.from_node.name, "src_sock": link.from_socket.name,
-                "dst": link.to_node.name, "dst_sock": link.to_socket.name
-            })
+            src_idx = get_socket_index(link.from_node.outputs, link.from_socket)
+            dst_idx = get_socket_index(link.to_node.inputs, link.to_socket)
+            
+            link_data = {
+                "src": link.from_node.name, 
+                "src_sock": link.from_socket.name,
+                "src_index": src_idx,
+                "dst": link.to_node.name, 
+                "dst_sock": link.to_socket.name,
+                "dst_index": dst_idx
+            }
+            data["links"].append(link_data)
+            
     return data
 
-def serialize_recursive(start_tree, selected_only=False):
+def serialize_recursive(start_tree, selected_only=False, is_compact=False):
     deps = {} 
     GROUP_TYPES = {'GeometryNodeGroup', 'ShaderNodeGroup', 'CompositorNodeGroup'}
     if selected_only: root_nodes = [n for n in start_tree.nodes if n.select]
     else: root_nodes = list(start_tree.nodes)
         
-    root_data = serialize_single_tree(start_tree, root_nodes)
+    root_data = serialize_single_tree(start_tree, root_nodes, is_compact=is_compact)
     trees_to_scan = set()
     for n in root_nodes:
         if n.bl_idname in GROUP_TYPES and n.node_tree: trees_to_scan.add(n.node_tree)
@@ -197,7 +223,7 @@ def serialize_recursive(start_tree, selected_only=False):
         if current_tree in scanned_trees: continue
         scanned_trees.add(current_tree)
         
-        tree_def = serialize_single_tree(current_tree)
+        tree_def = serialize_single_tree(current_tree, is_compact=is_compact)
         tree_def["interface"] = serialize_interface(current_tree)
         tree_def["type_id"] = current_tree.bl_idname 
         deps[current_tree.name] = tree_def
@@ -206,10 +232,10 @@ def serialize_recursive(start_tree, selected_only=False):
             if n.bl_idname in GROUP_TYPES and n.node_tree:
                 if n.node_tree not in scanned_trees: trees_to_scan.add(n.node_tree)
 
-    return { "version": "2.1.0", "root": root_data, "dependencies": deps }
+    return { "version": "2.5.2", "compact": is_compact, "root": root_data, "dependencies": deps }
 
 # ==============================================================================
-# 3. 核心逻辑：智能构建 (双重尝试 + Undo)
+# 3. Core Logic: Smart Build & Auto-Layout
 # ==============================================================================
 
 def rebuild_interface(node_tree, interface_data):
@@ -231,81 +257,189 @@ def rebuild_interface(node_tree, interface_data):
                 if item.get("max_value") is not None: socket_item.max_value = item.get("max_value")
         except: pass
 
+def apply_hierarchical_layout(node_tree, new_nodes):
+    """ Fallback layout if NO coordinates exist at all. """
+    if not new_nodes: return
+    node_map = {n.name: n for n in new_nodes}
+    children = {n.name: [] for n in new_nodes}
+    parents = {n.name: [] for n in new_nodes}
+    
+    for link in node_tree.links:
+        if link.from_node.name in node_map and link.to_node.name in node_map:
+            children[link.from_node.name].append(link.to_node.name)
+            parents[link.to_node.name].append(link.from_node.name)
+
+    levels = {n.name: 0 for n in new_nodes}
+    queue = [name for name, p_list in parents.items() if not p_list]
+    if not queue and new_nodes: queue = [new_nodes[0].name]
+    visited = set(queue)
+    
+    while queue:
+        current_name = queue.pop(0)
+        current_level = levels[current_name]
+        for child_name in children[current_name]:
+            if levels[child_name] < current_level + 1:
+                levels[child_name] = current_level + 1
+                if child_name not in visited: queue.append(child_name)
+            if levels[child_name] > 200: continue
+
+    level_groups = {}
+    for name, lvl in levels.items():
+        if lvl not in level_groups: level_groups[lvl] = []
+        level_groups[lvl].append(name)
+        
+    X_STEP = 300
+    Y_STEP = -220
+    
+    for lvl in sorted(level_groups.keys()):
+        group = level_groups[lvl]
+        def get_parent_avg_y(n_name):
+            ps = parents[n_name]
+            if not ps: return 0
+            y_sum = sum([node_map[p].location.y for p in ps])
+            return y_sum / len(ps)
+        if lvl > 0: group.sort(key=get_parent_avg_y, reverse=True)
+        
+        start_y = ((len(group) - 1) * abs(Y_STEP)) / 2
+        for i, name in enumerate(group):
+            node_map[name].location.x = lvl * X_STEP
+            node_map[name].location.y = start_y + (i * Y_STEP)
+
 def build_single_tree(node_tree, data, offset=(0,0), clear=False, conversion_log=None):
     if clear: node_tree.nodes.clear()
     node_map = {}
-    cursor_x, cursor_y = offset
+    created_nodes = []
+    has_valid_location = False 
     
     target_tree_type = node_tree.bl_idname
-    # 直接使用内嵌的字典
     translation_map = NODE_TRANSLATION_TABLE.get(target_tree_type, {})
     GROUP_TYPES = {'GeometryNodeGroup', 'ShaderNodeGroup', 'CompositorNodeGroup'}
 
+    # 1. Create Nodes
     for n_data in data.get("nodes", []):
         original_type = n_data.get("type")
         target_type = original_type
         n_name = n_data.get("name")
         
-        # 1. Check Mapping
         has_mapped = False
         if original_type in translation_map:
             target_type = translation_map[original_type]
             has_mapped = True
         
-        # 2. Double-Try Strategy
         node = None
         created_type = None 
         
-        # Try A: Mapped Type
         if has_mapped:
             try:
                 node = node_tree.nodes.new(type=target_type)
                 created_type = target_type
                 if conversion_log is not None:
-                    # 简化日志显示
                     s_old = original_type.replace("ShaderNode", "").replace("GeometryNode", "").replace("Input", "")
                     s_new = target_type.replace("ShaderNode", "").replace("GeometryNode", "").replace("Input", "")
                     conversion_log.append(f"{n_name}: {s_old}->{s_new}")
             except: pass
 
-        # Try B: Original Type (Fallback)
         if node is None:
             try:
                 node = node_tree.nodes.new(type=original_type)
                 created_type = original_type
-            except Exception as e:
-                # print(f"Failed node {n_name}: {e}")
-                continue 
+            except: continue 
 
-        # 3. Setup
         if node:
-            node.name = n_name
+            node.name = n_name 
             node.select = True
+            node_map[n_name] = node 
+            created_nodes.append(node)
             
-            if created_type in GROUP_TYPES:
-                tree_name = n_data.get("node_tree_name")
-                if tree_name and tree_name in bpy.data.node_groups:
-                    node.node_tree = bpy.data.node_groups[tree_name]
-
-            loc = n_data.get("location", [0, 0])
-            if loc == [0, 0]:
-                node.location = (cursor_x, cursor_y)
-                cursor_x += 250
-                if cursor_x > 1000: cursor_x, cursor_y = 0, cursor_y - 200
-            else:
+            # Location Extraction
+            params_dict = n_data.get("params", {})
+            loc = params_dict.get("location_absolute", params_dict.get("location"))
+            if not loc: loc = n_data.get("location_absolute", n_data.get("location"))
+            
+            if loc and isinstance(loc, list) and len(loc) == 2:
                 node.location = (loc[0] + offset[0], loc[1] + offset[1])
+                if loc[0] != 0 or loc[1] != 0: has_valid_location = True
+            else:
+                node.location = (0, 0)
+            
+            if created_type == 'NodeFrame':
+                if "width" in n_data: node.width = n_data["width"]
+                if "height" in n_data: node.height = n_data["height"]
+                if "label" in params_dict: node.label = params_dict["label"]
 
-            for k, v in n_data.get("params", {}).items():
+            for k, v in params_dict.items():
+                if k in {"location", "location_absolute"}: continue
                 if hasattr(node, k):
                     try: setattr(node, k, v)
                     except: pass
             
             for k, v in n_data.get("inputs", {}).items():
                 if k in node.inputs:
-                    try: node.inputs[k].default_value = v
+                    try: 
+                        socket = node.inputs[k]
+                        if hasattr(socket, "type") and socket.type == 'OBJECT' and isinstance(v, str):
+                            socket.default_value = bpy.data.objects.get(v)
+                        elif hasattr(socket, "type") and socket.type == 'COLLECTION' and isinstance(v, str):
+                            socket.default_value = bpy.data.collections.get(v)
+                        elif hasattr(socket, "type") and socket.type == 'MATERIAL' and isinstance(v, str):
+                            socket.default_value = bpy.data.materials.get(v)
+                        elif hasattr(socket, "type") and socket.type == 'IMAGE' and isinstance(v, str):
+                            socket.default_value = bpy.data.images.get(v)
+                        else:
+                            node.inputs[k].default_value = v
                     except: pass
             
-            node_map[node.name] = node
+            if created_type in GROUP_TYPES:
+                tree_name = n_data.get("node_tree_name")
+                if tree_name and tree_name in bpy.data.node_groups:
+                    node.node_tree = bpy.data.node_groups[tree_name]
+
+    # 2. Establish Parenting (Explicit)
+    for n_data in data.get("nodes", []):
+        child_name = n_data.get("name")
+        parent_name = n_data.get("parent")
+        if child_name and parent_name:
+            child_node = node_map.get(child_name)
+            parent_node = node_map.get(parent_name)
+            if child_node and parent_node:
+                try: child_node.parent = parent_node
+                except: pass
+
+    # 3. [NEW] Implicit Parenting & Frame Centering
+    # AI often outputs frames as headers (Frame -> Nodes) but misses parent links and frame coordinates.
+    current_implicit_frame = None
+    frames_with_implicit_children = {} # {frame_node: [children]}
+
+    # Pass A: Infer Parenting from List Order
+    for node in created_nodes:
+        if node.bl_idname == 'NodeFrame':
+            current_implicit_frame = node
+            frames_with_implicit_children[node] = []
+        elif current_implicit_frame and node.parent is None:
+            # If node has no explicit parent, assume it belongs to the preceding frame
+            node.parent = current_implicit_frame
+            frames_with_implicit_children[current_implicit_frame].append(node)
+    
+    # Pass B: Reposition Frames to Centroid (Fix Overlap)
+    for frame, children in frames_with_implicit_children.items():
+        # Only touch frames that are at (0,0) (likely undefined by AI) and have children
+        if frame.location.x == 0 and frame.location.y == 0 and children:
+            # Calculate Centroid
+            avg_x = sum(n.location.x for n in children) / len(children)
+            avg_y = sum(n.location.y for n in children) / len(children)
+            
+            # Move Frame to Center
+            frame.location.x = avg_x
+            frame.location.y = avg_y
+            
+            # Important: Compensate children so they don't move visually
+            # (Parenting to a moved frame shifts children if local coords aren't updated)
+            for child in children:
+                child.location.x -= avg_x
+                child.location.y -= avg_y
+
+    if hasattr(node_tree, "update_tag"):
+        node_tree.update_tag()
 
     # 4. Relink
     for l in data.get("links", []):
@@ -313,43 +447,70 @@ def build_single_tree(node_tree, data, offset=(0,0), clear=False, conversion_log
         dst = node_map.get(l.get("dst"))
         if src and dst:
             try:
-                s_sock = src.outputs.get(l.get("src_sock")) or (src.outputs[0] if src.outputs else None)
-                d_sock = dst.inputs.get(l.get("dst_sock")) or (dst.inputs[0] if dst.inputs else None)
-                if s_sock and d_sock: node_tree.links.new(s_sock, d_sock)
-            except: pass
+                src_idx = l.get("src_index")
+                dst_idx = l.get("dst_index")
+                s_sock = None
+                d_sock = None
+
+                if src_idx is not None and isinstance(src_idx, int) and 0 <= src_idx < len(src.outputs):
+                    s_sock = src.outputs[src_idx]
+                else: s_sock = src.outputs.get(l.get("src_sock"))
+                
+                if dst_idx is not None and isinstance(dst_idx, int) and 0 <= dst_idx < len(dst.inputs):
+                    d_sock = dst.inputs[dst_idx]
+                else: d_sock = dst.inputs.get(l.get("dst_sock"))
+
+                if not s_sock and src.outputs: s_sock = src.outputs[0]
+                if not d_sock and dst.inputs: d_sock = dst.inputs[0]
+
+                if s_sock and d_sock:
+                    node_tree.links.new(s_sock, d_sock)
+            except Exception as e:
+                print(f"Link Error: {e}")
+
+    # 5. Global Auto Layout Trigger
+    # Only if absolutely no valid locations were found (e.g. pure logic graph)
+    if not has_valid_location and len(created_nodes) > 1:
+        apply_hierarchical_layout(node_tree, created_nodes)
 
 def build_full_structure(main_tree, json_content, is_replace=True):
-    try:
-        full_data = json.loads(json_content)
-    except: return "JSON 格式错误"
+    try: full_data = json.loads(json_content)
+    except: return "JSON Format Error"
     
     conversion_log = []
-
     deps = full_data.get("dependencies", {})
+    
     for group_name, group_data in deps.items():
-        if not bpy.data.node_groups.get(group_name):
-            tree_type = group_data.get("type_id", "GeometryNodeTree") 
-            new_group = bpy.data.node_groups.new(group_name, tree_type)
-            rebuild_interface(new_group, group_data.get("interface", []))
-            build_single_tree(new_group, group_data, clear=True)
+        tree_type = group_data.get("type_id", "GeometryNodeTree") 
+        if group_name in bpy.data.node_groups:
+            target_group = bpy.data.node_groups[group_name]
+            if target_group.bl_idname != tree_type:
+                target_group.name = group_name + "_backup"
+                target_group = bpy.data.node_groups.new(group_name, tree_type)
+            else:
+                target_group.clear()
+                target_group.interface.clear()
+        else:
+            target_group = bpy.data.node_groups.new(group_name, tree_type)
+        rebuild_interface(target_group, group_data.get("interface", []))
+        build_single_tree(target_group, group_data, clear=True)
 
     root_data = full_data.get("root", {})
-    
     if not is_replace:
         for n in main_tree.nodes: n.select = False
         build_single_tree(main_tree, root_data, offset=(200, -200), clear=False, conversion_log=conversion_log)
     else:
         build_single_tree(main_tree, root_data, clear=True, conversion_log=conversion_log)
 
-    msg = "构建成功"
+    msg = "Build Success"
     if conversion_log:
         unique_logs = list(set(conversion_log))
         details = ", ".join(unique_logs)
-        msg += f" | 转换: [{details}]"
+        msg += f" | Converted: [{details}]"
     return msg
 
 # ==============================================================================
-# UI & 注册
+# UI & Registration
 # ==============================================================================
 
 class GN_OT_Serialize(bpy.types.Operator):
@@ -361,13 +522,14 @@ class GN_OT_Serialize(bpy.types.Operator):
     def execute(self, context):
         space = context.space_data
         if not space.edit_tree: return {'CANCELLED'}
+        is_compact = context.scene.gn_compact_mode
         try:
             json_str = json.dumps(
-                serialize_recursive(space.edit_tree, self.mode == 'SELECTED'),
+                serialize_recursive(space.edit_tree, self.mode == 'SELECTED', is_compact=is_compact),
                 indent=2, ensure_ascii=False
             )
             context.window_manager.clipboard = json_str
-            self.report({'INFO'}, f"数据已复制 (v2.1.0)")
+            self.report({'INFO'}, "Copied to Clipboard")
         except Exception as e:
             self.report({'ERROR'}, str(e))
         return {'FINISHED'}
@@ -381,14 +543,13 @@ class GN_OT_Build(bpy.types.Operator):
     def execute(self, context):
         space = context.space_data
         if not space.edit_tree: return {'CANCELLED'}
-        
         msg = build_full_structure(space.edit_tree, context.window_manager.clipboard, self.mode == 'REPLACE')
-        if "成功" in msg: self.report({'INFO'}, msg)
+        if "Success" in msg: self.report({'INFO'}, msg)
         else: self.report({'ERROR'}, msg)
         return {'FINISHED'}
 
 class GN_PT_Panel(bpy.types.Panel):
-    bl_label = "GeoNeural v2.1"
+    bl_label = "GeoNeural v2.5.2 (Smart-Frame)"
     bl_idname = "GN_PT_main"
     bl_space_type = 'NODE_EDITOR' 
     bl_region_type = 'UI'
@@ -408,23 +569,27 @@ class GN_PT_Panel(bpy.types.Panel):
             layout.label(text="Mode: No Tree", icon='ERROR')
 
         box = layout.box()
-        box.label(text="To AI (复制):")
+        box.label(text="To AI (Copy):")
+        box.prop(context.scene, "gn_compact_mode", text="AI Compact Mode")
         row = box.row()
-        row.operator("gn.serialize", text="全部", icon='COPYDOWN').mode = 'ALL'
-        row.operator("gn.serialize", text="选中", icon='RESTRICT_SELECT_OFF').mode = 'SELECTED'
+        row.operator("gn.serialize", text="All").mode = 'ALL'
+        row.operator("gn.serialize", text="Selected").mode = 'SELECTED'
         
         box2 = layout.box()
-        box2.label(text="From AI (构建):")
+        box2.label(text="From AI (Build):")
         row2 = box2.row()
-        row2.operator("gn.build", text="追加", icon='ADD').mode = 'APPEND'
-        row2.operator("gn.build", text="覆盖", icon='TRASH').mode = 'REPLACE'
+        row2.operator("gn.build", text="Append").mode = 'APPEND'
+        row2.operator("gn.build", text="Replace (Auto Layout)").mode = 'REPLACE'
 
 classes = (GN_OT_Serialize, GN_OT_Build, GN_PT_Panel)
 
 def register():
+    bpy.types.Scene.gn_compact_mode = bpy.props.BoolProperty(default=False)
     for cls in classes: bpy.utils.register_class(cls)
+
 def unregister():
     for cls in classes: bpy.utils.unregister_class(cls)
+    del bpy.types.Scene.gn_compact_mode
 
 if __name__ == "__main__":
     register()
