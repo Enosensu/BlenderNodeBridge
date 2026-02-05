@@ -1,15 +1,16 @@
 bl_info = {
-    "name": "GeoNeural Bridge (v2.7.6 Index-Lock)",
+    "name": "GeoNeural Bridge (v2.8.6 Param-Fix)",
     "author": "Dev_Nodes_V5",
-    "version": (2, 7, 6),
+    "version": (2, 8, 6),
     "blender": (4, 0, 0),
     "location": "Node Editor > Sidebar > GeoNeural",
-    "description": "Fix: Correctly handles input value indexing when previous sockets are linked.",
+    "description": "Fix: Auto-corrects API parameter names (e.g., 'mode' -> 'mode_enum' for SetCurveNormal).",
     "category": "Node",
 }
 
 import bpy
 import json
+import re
 
 # ==============================================================================
 # 0. Import External Database (Modularization)
@@ -21,7 +22,7 @@ except ImportError:
     NODE_TRANSLATION_TABLE = {"GeometryNodeTree": {}, "ShaderNodeTree": {}, "CompositorNodeTree": {}}
 
 # ==============================================================================
-# 1. Utility: Data Cleaning
+# 1. Utility: Data Cleaning & Robust Parsing
 # ==============================================================================
 
 def clean_data(value):
@@ -42,6 +43,24 @@ def get_socket_index(node_sockets, target_socket):
         if s == target_socket:
             return i
     return -1
+
+def extract_and_clean_json(text):
+    if not text: return "{}"
+    start_idx = text.find('{')
+    end_idx = text.rfind('}')
+    if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
+        text = text[start_idx : end_idx + 1]
+    
+    # Remove C-style comments and trailing commas
+    pattern = r'("[^"\\]*(?:\\.[^"\\]*)*")|(\/\/.*|\/\*[\s\S]*?\*\/)'
+    def _replacer(match):
+        if match.group(2): return ""
+        return match.group(1)
+    
+    clean_text = re.sub(pattern, _replacer, text)
+    clean_text = re.sub(r',\s*([\]}])', r'\1', clean_text)
+    
+    return clean_text
 
 # ==============================================================================
 # 2. Core Logic: Serialization
@@ -116,34 +135,26 @@ def serialize_single_tree(node_tree, nodes_to_process=None, is_compact=False):
                     node_data["params"][prop] = safe_val
             except: pass
 
-        # [CRITICAL FIX v2.7.6] Input Index-Lock
-        # We must iterate ALL valid sockets to maintain the correct "Value___X" count,
-        # even if the socket is linked and we don't save its value.
-        
         input_name_counts = {}
         node_inputs_data = {}
 
         for socket in node.inputs:
             if socket.bl_idname in {'NodeSocketGeometry', 'NodeSocketShader', 'NodeSocketVirtual'}: continue
             
-            # Skip ghost sockets (v2.7.5 fix)
             if hasattr(socket, "enabled") and not socket.enabled:
                 continue
 
-            # 1. Determine the Key Name (Logic must run for EVERY valid socket)
-            s_name = socket.name
-            if s_name in input_name_counts:
-                unique_key = f"{s_name}___{input_name_counts[s_name]}"
-                input_name_counts[s_name] += 1
-            else:
-                unique_key = s_name
-                input_name_counts[s_name] = 1
-
-            # 2. Save Value ONLY if not linked
             if not socket.is_linked:
                 try:
                     val = clean_data(socket.default_value)
                     if val is not None:
+                        s_name = socket.name
+                        if s_name in input_name_counts:
+                            unique_key = f"{s_name}___{input_name_counts[s_name]}"
+                            input_name_counts[s_name] += 1
+                        else:
+                            unique_key = s_name
+                            input_name_counts[s_name] = 1
                         node_inputs_data[unique_key] = val
                 except: pass
         
@@ -193,7 +204,7 @@ def serialize_recursive(start_tree, selected_only=False, is_compact=False):
             if n.bl_idname in GROUP_TYPES and n.node_tree:
                 if n.node_tree not in scanned_trees: trees_to_scan.add(n.node_tree)
 
-    return { "version": "2.7.6", "compact": is_compact, "root": root_data, "dependencies": deps }
+    return { "version": "2.8.6", "compact": is_compact, "root": root_data, "dependencies": deps }
 
 # ==============================================================================
 # 3. Core Logic: Smart Build & Auto-Layout
@@ -329,13 +340,29 @@ def build_single_tree(node_tree, data, offset=(0,0), clear=False, conversion_log
                 if "height" in n_data: node.height = n_data["height"]
                 if "label" in params_dict: node.label = params_dict["label"]
 
+            # [FIX v2.8.6] Parameter Alias Mapping
+            # Handle AI "mode" vs Blender "mode_enum" mismatch
             for k, v in params_dict.items():
                 if k in {"location", "location_absolute"}: continue
+                
+                # 1. Try Direct Assignment
                 if hasattr(node, k):
                     try: setattr(node, k, v)
                     except: pass
+                else:
+                    # 2. Try Alias Mapping (Fallback)
+                    # AI often says "mode" but Blender wants "mode_enum" or "method"
+                    if k == "mode":
+                        if hasattr(node, "mode_enum"):
+                            try: setattr(node, "mode_enum", v)
+                            except: pass
+                        elif hasattr(node, "method"):
+                            try: setattr(node, "method", v)
+                            except: pass
+                        elif hasattr(node, "operation"):
+                            try: setattr(node, "operation", v)
+                            except: pass
             
-            # Inputs Reconstruction
             socket_map = {}
             for s in node.inputs:
                 if s.name not in socket_map: socket_map[s.name] = []
@@ -420,30 +447,64 @@ def build_single_tree(node_tree, data, offset=(0,0), clear=False, conversion_log
     if hasattr(node_tree, "update_tag"):
         node_tree.update_tag()
 
-    # 4. Relink
+    # 4. Relink (Fuzzy Logic)
+    def normalize_str(s):
+        return s.lower().replace(" ", "").replace("_", "")
+
+    def find_node_smart(tree, name, current_map):
+        if name in current_map: return current_map[name]
+        if name in tree.nodes: return tree.nodes[name]
+        norm_name = normalize_str(name)
+        for n in tree.nodes:
+            if n.label and normalize_str(n.label) == norm_name: return n
+            if n.label == name: return n
+        for n in tree.nodes:
+            if normalize_str(n.name) == norm_name: return n
+        for n in tree.nodes:
+            if normalize_str(n.name).startswith(norm_name): return n
+        return None
+
+    def find_socket_smart(node_sockets, name):
+        if name in node_sockets: return node_sockets[name]
+        norm_name = normalize_str(name)
+        for s in node_sockets:
+            s_norm = normalize_str(s.name)
+            if s_norm == norm_name: return s
+            if s_norm in norm_name or norm_name in s_norm:
+                return s
+        return None
+
     for l in data.get("links", []):
-        src = node_map.get(l.get("src"))
-        dst = node_map.get(l.get("dst"))
+        src_name = l.get("src")
+        dst_name = l.get("dst")
+        
+        src = find_node_smart(node_tree, src_name, node_map)
+        dst = find_node_smart(node_tree, dst_name, node_map)
+
         if src and dst:
             try:
+                src_sock = None
                 src_idx = l.get("src_index")
-                dst_idx = l.get("dst_index")
-                s_sock = None
-                d_sock = None
-
-                if src_idx is not None and isinstance(src_idx, int) and 0 <= src_idx < len(src.outputs):
-                    s_sock = src.outputs[src_idx]
-                else: s_sock = src.outputs.get(l.get("src_sock"))
+                src_sock_name = l.get("src_sock")
                 
+                if src_idx is not None and isinstance(src_idx, int) and 0 <= src_idx < len(src.outputs):
+                    src_sock = src.outputs[src_idx]
+                elif src_sock_name:
+                    src_sock = find_socket_smart(src.outputs, src_sock_name)
+                if not src_sock and src.outputs: src_sock = src.outputs[0]
+
+                d_sock = None
+                dst_idx = l.get("dst_index")
+                dst_sock_name = l.get("dst_sock")
+
                 if dst_idx is not None and isinstance(dst_idx, int) and 0 <= dst_idx < len(dst.inputs):
                     d_sock = dst.inputs[dst_idx]
-                else: d_sock = dst.inputs.get(l.get("dst_sock"))
-
-                if not s_sock and src.outputs: s_sock = src.outputs[0]
+                elif dst_sock_name:
+                    d_sock = find_socket_smart(dst.inputs, dst_sock_name)
                 if not d_sock and dst.inputs: d_sock = dst.inputs[0]
 
-                if s_sock and d_sock:
-                    node_tree.links.new(s_sock, d_sock)
+                if src_sock and d_sock:
+                    node_tree.links.new(src_sock, d_sock)
             except Exception as e:
                 print(f"Link Error: {e}")
 
@@ -452,8 +513,11 @@ def build_single_tree(node_tree, data, offset=(0,0), clear=False, conversion_log
         apply_hierarchical_layout(node_tree, created_nodes)
 
 def build_full_structure(main_tree, json_content, is_replace=True):
-    try: full_data = json.loads(json_content)
-    except: return "JSON Format Error"
+    try: 
+        clean_content = extract_and_clean_json(json_content)
+        full_data = json.loads(clean_content)
+    except Exception as e:
+        return f"JSON Parse Error: {e}"
     
     conversion_log = []
     deps = full_data.get("dependencies", {})
@@ -533,7 +597,7 @@ class GN_OT_Build(bpy.types.Operator):
         return {'FINISHED'}
 
 class GN_PT_Panel(bpy.types.Panel):
-    bl_label = "GeoNeural v2.7.6 (Index-Lock)"
+    bl_label = "GeoNeural v2.8.6 (Param-Fix)"
     bl_idname = "GN_PT_main"
     bl_space_type = 'NODE_EDITOR' 
     bl_region_type = 'UI'
