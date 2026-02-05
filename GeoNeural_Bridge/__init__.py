@@ -1,10 +1,10 @@
 bl_info = {
-    "name": "GeoNeural Bridge (v2.7.3 Value-Fix)",
+    "name": "GeoNeural Bridge (v2.7.6 Index-Lock)",
     "author": "Dev_Nodes_V5",
-    "version": (2, 7, 3),
+    "version": (2, 7, 6),
     "blender": (4, 0, 0),
     "location": "Node Editor > Sidebar > GeoNeural",
-    "description": "Critical Fix: Preserves duplicate-named input values (e.g. Math Node) in all modes.",
+    "description": "Fix: Correctly handles input value indexing when previous sockets are linked.",
     "category": "Node",
 }
 
@@ -87,7 +87,6 @@ def serialize_single_tree(node_tree, nodes_to_process=None, is_compact=False):
             "inputs": {}
         }
         
-        # Always preserve Parent info for AI context
         if node.parent:
             node_data["parent"] = node.parent.name
 
@@ -100,13 +99,11 @@ def serialize_single_tree(node_tree, nodes_to_process=None, is_compact=False):
         if node.bl_idname in GROUP_TYPES and node.node_tree:
             node_data["node_tree_name"] = node.node_tree.name
 
-        # Params Serialization
         for prop in node.bl_rna.properties.keys():
             if prop in ALWAYS_EXCLUDE: continue
             
             if is_compact:
                 if prop in COMPACT_EXCLUDE: 
-                    # Exception: Keep Frame labels
                     if prop == 'label' and node.bl_idname == 'NodeFrame':
                         pass
                     else:
@@ -119,33 +116,34 @@ def serialize_single_tree(node_tree, nodes_to_process=None, is_compact=False):
                     node_data["params"][prop] = safe_val
             except: pass
 
-        # [CRITICAL FIX v2.7.3] Inputs Serialization with Collision Handling
-        # Math nodes often have two inputs named "Value". A dictionary key "Value" 
-        # would overwrite the first one. We must detect duplicates and append IDs.
+        # [CRITICAL FIX v2.7.6] Input Index-Lock
+        # We must iterate ALL valid sockets to maintain the correct "Value___X" count,
+        # even if the socket is linked and we don't save its value.
         
-        input_name_counts = {} # Tracks usage of names: {"Value": 1}
+        input_name_counts = {}
         node_inputs_data = {}
 
         for socket in node.inputs:
             if socket.bl_idname in {'NodeSocketGeometry', 'NodeSocketShader', 'NodeSocketVirtual'}: continue
             
-            # Even if linked, some nodes might use the value? Usually not for geometry nodes.
-            # Standard logic: save if not linked.
+            # Skip ghost sockets (v2.7.5 fix)
+            if hasattr(socket, "enabled") and not socket.enabled:
+                continue
+
+            # 1. Determine the Key Name (Logic must run for EVERY valid socket)
+            s_name = socket.name
+            if s_name in input_name_counts:
+                unique_key = f"{s_name}___{input_name_counts[s_name]}"
+                input_name_counts[s_name] += 1
+            else:
+                unique_key = s_name
+                input_name_counts[s_name] = 1
+
+            # 2. Save Value ONLY if not linked
             if not socket.is_linked:
                 try:
                     val = clean_data(socket.default_value)
                     if val is not None:
-                        s_name = socket.name
-                        
-                        # Generate Unique Key
-                        if s_name in input_name_counts:
-                            # Collision! Append index: Value___1
-                            unique_key = f"{s_name}___{input_name_counts[s_name]}"
-                            input_name_counts[s_name] += 1
-                        else:
-                            unique_key = s_name
-                            input_name_counts[s_name] = 1
-                        
                         node_inputs_data[unique_key] = val
                 except: pass
         
@@ -195,7 +193,7 @@ def serialize_recursive(start_tree, selected_only=False, is_compact=False):
             if n.bl_idname in GROUP_TYPES and n.node_tree:
                 if n.node_tree not in scanned_trees: trees_to_scan.add(n.node_tree)
 
-    return { "version": "2.7.3", "compact": is_compact, "root": root_data, "dependencies": deps }
+    return { "version": "2.7.6", "compact": is_compact, "root": root_data, "dependencies": deps }
 
 # ==============================================================================
 # 3. Core Logic: Smart Build & Auto-Layout
@@ -315,7 +313,6 @@ def build_single_tree(node_tree, data, offset=(0,0), clear=False, conversion_log
             node_map[n_name] = node 
             created_nodes.append(node)
             
-            # Location Extraction & Protection
             params_dict = n_data.get("params", {})
             loc = params_dict.get("location_absolute", params_dict.get("location"))
             if not loc: loc = n_data.get("location_absolute", n_data.get("location"))
@@ -332,26 +329,20 @@ def build_single_tree(node_tree, data, offset=(0,0), clear=False, conversion_log
                 if "height" in n_data: node.height = n_data["height"]
                 if "label" in params_dict: node.label = params_dict["label"]
 
-            # Params
             for k, v in params_dict.items():
                 if k in {"location", "location_absolute"}: continue
                 if hasattr(node, k):
                     try: setattr(node, k, v)
                     except: pass
             
-            # [CRITICAL FIX v2.7.3] Inputs Reconstruction with Collision Logic
-            # We need to map JSON keys "Value", "Value___1" back to the correct sockets
-            
-            # Helper: Map base name to list of sockets in order
-            socket_map = {} # {"Value": [SocketObj1, SocketObj2]}
+            # Inputs Reconstruction
+            socket_map = {}
             for s in node.inputs:
                 if s.name not in socket_map: socket_map[s.name] = []
                 socket_map[s.name].append(s)
 
             for k, v in n_data.get("inputs", {}).items():
-                # Parse Key
                 if "___" in k:
-                    # It's a duplicate entry, extract index
                     try:
                         base_name, idx_str = k.rsplit("___", 1)
                         idx = int(idx_str)
@@ -360,14 +351,12 @@ def build_single_tree(node_tree, data, offset=(0,0), clear=False, conversion_log
                 else:
                     base_name, idx = k, 0
                 
-                # Locate Target Socket
                 target_sock = None
                 if base_name in socket_map:
                     candidates = socket_map[base_name]
                     if idx < len(candidates):
                         target_sock = candidates[idx]
                 
-                # Assign Value
                 if target_sock:
                     try: 
                         if hasattr(target_sock, "type") and target_sock.type == 'OBJECT' and isinstance(v, str):
@@ -484,7 +473,13 @@ def build_full_structure(main_tree, json_content, is_replace=True):
         rebuild_interface(target_group, group_data.get("interface", []))
         build_single_tree(target_group, group_data, clear=True)
 
-    root_data = full_data.get("root", {})
+    root_data = full_data.get("root")
+    if root_data is None:
+        if "nodes" in full_data:
+            root_data = full_data
+        else:
+            root_data = {} 
+
     if not is_replace:
         for n in main_tree.nodes: n.select = False
         build_single_tree(main_tree, root_data, offset=(200, -200), clear=False, conversion_log=conversion_log)
@@ -538,7 +533,7 @@ class GN_OT_Build(bpy.types.Operator):
         return {'FINISHED'}
 
 class GN_PT_Panel(bpy.types.Panel):
-    bl_label = "GeoNeural v2.7.3 (Value-Fix)"
+    bl_label = "GeoNeural v2.7.6 (Index-Lock)"
     bl_idname = "GN_PT_main"
     bl_space_type = 'NODE_EDITOR' 
     bl_region_type = 'UI'
