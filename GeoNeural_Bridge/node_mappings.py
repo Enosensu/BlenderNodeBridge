@@ -1,542 +1,145 @@
-# ==============================================================================
-# GeoNeural Bridge - External Mapping Database
-# This file stores the translation table for API names vs UI names/Short names.
-# ==============================================================================
+import bpy
+import json
+import os
 
-NODE_TRANSLATION_TABLE = {
-    # ==========================================================================
-    # 1. Geometry Nodes (Auto-Extracted from Blender 5.0)
-    # ==========================================================================
-    "GeometryNodeTree": {
-        "": "GeometryNode",
-        "AccumulateField": "GeometryNodeAccumulateField",
-        "AttributeDomainSize": "GeometryNodeAttributeDomainSize",
-        "AttributeStatistic": "GeometryNodeAttributeStatistic",
-        "Bake": "GeometryNodeBake",
-        "BlurAttribute": "GeometryNodeBlurAttribute",
-        "BoundBox": "GeometryNodeBoundBox",
-        "CameraInfo": "GeometryNodeCameraInfo",
-        "CaptureAttribute": "GeometryNodeCaptureAttribute",
-        "CollectionInfo": "GeometryNodeCollectionInfo",
-        "ConvexHull": "GeometryNodeConvexHull",
-        "CornersOfEdge": "GeometryNodeCornersOfEdge",
-        "CornersOfFace": "GeometryNodeCornersOfFace",
-        "CornersOfVertex": "GeometryNodeCornersOfVertex",
-        "CurveArc": "GeometryNodeCurveArc",
-        "CurveEndpointSelection": "GeometryNodeCurveEndpointSelection",
-        "CurveHandleTypeSelection": "GeometryNodeCurveHandleTypeSelection",
-        "CurveLength": "GeometryNodeCurveLength",
-        "CurveOfPoint": "GeometryNodeCurveOfPoint",
-        "CurvePrimitiveBezierSegment": "GeometryNodeCurvePrimitiveBezierSegment",
-        "CurvePrimitiveCircle": "GeometryNodeCurvePrimitiveCircle",
-        "CurvePrimitiveLine": "GeometryNodeCurvePrimitiveLine",
-        "CurvePrimitiveQuadrilateral": "GeometryNodeCurvePrimitiveQuadrilateral",
-        "CurveQuadraticBezier": "GeometryNodeCurveQuadraticBezier",
-        "CurveSetHandles": "GeometryNodeCurveSetHandles",
-        "CurveSpiral": "GeometryNodeCurveSpiral",
-        "CurveSplineType": "GeometryNodeCurveSplineType",
-        "CurveStar": "GeometryNodeCurveStar",
-        "CurveTangent": "GeometryNodeInputTangent",
-        "CurveToMesh": "GeometryNodeCurveToMesh",
-        "CurveToPoints": "GeometryNodeCurveToPoints",
-        "CurvesToGreasePencil": "GeometryNodeCurvesToGreasePencil",
-        "CustomGroup": "GeometryNodeCustomGroup",
-        "DeformCurvesOnSurface": "GeometryNodeDeformCurvesOnSurface",
-        "DeleteGeometry": "GeometryNodeDeleteGeometry",
-        "DistributePointsInGrid": "GeometryNodeDistributePointsInGrid",
-        "DistributePointsInVolume": "GeometryNodeDistributePointsInVolume",
-        "DistributePointsOnFaces": "GeometryNodeDistributePointsOnFaces",
-        "DualMesh": "GeometryNodeDualMesh",
-        "DuplicateElements": "GeometryNodeDuplicateElements",
-        "EdgePathsToCurves": "GeometryNodeEdgePathsToCurves",
-        "EdgePathsToSelection": "GeometryNodeEdgePathsToSelection",
-        "EdgesOfCorner": "GeometryNodeEdgesOfCorner",
-        "EdgesOfVertex": "GeometryNodeEdgesOfVertex",
-        "EdgesToFaceGroups": "GeometryNodeEdgesToFaceGroups",
-        "EndpointSelection": "GeometryNodeCurveEndpointSelection",
-        "ExtrudeMesh": "GeometryNodeExtrudeMesh",
-        "FaceOfCorner": "GeometryNodeFaceOfCorner",
-        "FieldAtIndex": "GeometryNodeFieldAtIndex",
-        "FieldAverage": "GeometryNodeFieldAverage",
-        "FieldMinAndMax": "GeometryNodeFieldMinAndMax",
-        "FieldOnDomain": "GeometryNodeFieldOnDomain",
-        "FieldToGrid": "GeometryNodeFieldToGrid",
-        "FieldToGridItem": "GeometryNodeFieldToGridItem",
-        "FieldToGridItems": "GeometryNodeFieldToGridItems",
-        "FieldVariance": "GeometryNodeFieldVariance",
-        "FillCurve": "GeometryNodeFillCurve",
-        "FilletCurve": "GeometryNodeFilletCurve",
-        "FlipFaces": "GeometryNodeFlipFaces",
-        "ForeachGeometryElementInput": "GeometryNodeForeachGeometryElementInput",
-        "ForeachGeometryElementOutput": "GeometryNodeForeachGeometryElementOutput",
-        "GeometryNode": "GeometryNode",
-        "GeometryNodeAccumulateField": "GeometryNodeAccumulateField",
-        "GeometryNodeAttributeDomainSize": "GeometryNodeAttributeDomainSize",
-        "GeometryNodeAttributeStatistic": "GeometryNodeAttributeStatistic",
-        "GeometryNodeBake": "GeometryNodeBake",
-        "GeometryNodeBlurAttribute": "GeometryNodeBlurAttribute",
-        "GeometryNodeBoundBox": "GeometryNodeBoundBox",
-        "GeometryNodeCameraInfo": "GeometryNodeCameraInfo",
-        "GeometryNodeCaptureAttribute": "GeometryNodeCaptureAttribute",
-        "GeometryNodeCollectionInfo": "GeometryNodeCollectionInfo",
-        "GeometryNodeConvexHull": "GeometryNodeConvexHull",
-        "GeometryNodeCornersOfEdge": "GeometryNodeCornersOfEdge",
-        "GeometryNodeCornersOfFace": "GeometryNodeCornersOfFace",
-        "GeometryNodeCornersOfVertex": "GeometryNodeCornersOfVertex",
-        "GeometryNodeCurveArc": "GeometryNodeCurveArc",
-        "GeometryNodeCurveEndpointSelection": "GeometryNodeCurveEndpointSelection",
-        "GeometryNodeCurveHandleTypeSelection": "GeometryNodeCurveHandleTypeSelection",
-        "GeometryNodeCurveLength": "GeometryNodeCurveLength",
-        "GeometryNodeCurveOfPoint": "GeometryNodeCurveOfPoint",
-        "GeometryNodeCurvePrimitiveBezierSegment": "GeometryNodeCurvePrimitiveBezierSegment",
-        "GeometryNodeCurvePrimitiveCircle": "GeometryNodeCurvePrimitiveCircle",
-        "GeometryNodeCurvePrimitiveLine": "GeometryNodeCurvePrimitiveLine",
-        "GeometryNodeCurvePrimitiveQuadrilateral": "GeometryNodeCurvePrimitiveQuadrilateral",
-        "GeometryNodeCurveQuadraticBezier": "GeometryNodeCurveQuadraticBezier",
-        "GeometryNodeCurveSetHandles": "GeometryNodeCurveSetHandles",
-        "GeometryNodeCurveSpiral": "GeometryNodeCurveSpiral",
-        "GeometryNodeCurveSplineType": "GeometryNodeCurveSplineType",
-        "GeometryNodeCurveStar": "GeometryNodeCurveStar",
-        "GeometryNodeCurveToMesh": "GeometryNodeCurveToMesh",
-        "GeometryNodeCurveToPoints": "GeometryNodeCurveToPoints",
-        "GeometryNodeCurvesToGreasePencil": "GeometryNodeCurvesToGreasePencil",
-        "GeometryNodeCustomGroup": "GeometryNodeCustomGroup",
-        "GeometryNodeDeformCurvesOnSurface": "GeometryNodeDeformCurvesOnSurface",
-        "GeometryNodeDeleteGeometry": "GeometryNodeDeleteGeometry",
-        "GeometryNodeDistributePointsInGrid": "GeometryNodeDistributePointsInGrid",
-        "GeometryNodeDistributePointsInVolume": "GeometryNodeDistributePointsInVolume",
-        "GeometryNodeDistributePointsOnFaces": "GeometryNodeDistributePointsOnFaces",
-        "GeometryNodeDualMesh": "GeometryNodeDualMesh",
-        "GeometryNodeDuplicateElements": "GeometryNodeDuplicateElements",
-        "GeometryNodeEdgePathsToCurves": "GeometryNodeEdgePathsToCurves",
-        "GeometryNodeEdgePathsToSelection": "GeometryNodeEdgePathsToSelection",
-        "GeometryNodeEdgesOfCorner": "GeometryNodeEdgesOfCorner",
-        "GeometryNodeEdgesOfVertex": "GeometryNodeEdgesOfVertex",
-        "GeometryNodeEdgesToFaceGroups": "GeometryNodeEdgesToFaceGroups",
-        "GeometryNodeExtrudeMesh": "GeometryNodeExtrudeMesh",
-        "GeometryNodeFaceOfCorner": "GeometryNodeFaceOfCorner",
-        "GeometryNodeFieldAtIndex": "GeometryNodeFieldAtIndex",
-        "GeometryNodeFieldAverage": "GeometryNodeFieldAverage",
-        "GeometryNodeFieldMinAndMax": "GeometryNodeFieldMinAndMax",
-        "GeometryNodeFieldOnDomain": "GeometryNodeFieldOnDomain",
-        "GeometryNodeFieldToGrid": "GeometryNodeFieldToGrid",
-        "GeometryNodeFieldToGridItem": "GeometryNodeFieldToGridItem",
-        "GeometryNodeFieldToGridItems": "GeometryNodeFieldToGridItems",
-        "GeometryNodeFieldVariance": "GeometryNodeFieldVariance",
-        "GeometryNodeFillCurve": "GeometryNodeFillCurve",
-        "GeometryNodeFilletCurve": "GeometryNodeFilletCurve",
-        "GeometryNodeFlipFaces": "GeometryNodeFlipFaces",
-        "GeometryNodeForeachGeometryElementInput": "GeometryNodeForeachGeometryElementInput",
-        "GeometryNodeForeachGeometryElementOutput": "GeometryNodeForeachGeometryElementOutput",
-        "GeometryNodeGeometryToInstance": "GeometryNodeGeometryToInstance",
-        "GeometryNodeGetNamedGrid": "GeometryNodeGetNamedGrid",
-        "GeometryNodeGizmoDial": "GeometryNodeGizmoDial",
-        "GeometryNodeGizmoLinear": "GeometryNodeGizmoLinear",
-        "GeometryNodeGizmoTransform": "GeometryNodeGizmoTransform",
-        "GeometryNodeGreasePencilToCurves": "GeometryNodeGreasePencilToCurves",
-        "GeometryNodeGridAdvect": "GeometryNodeGridAdvect",
-        "GeometryNodeGridCurl": "GeometryNodeGridCurl",
-        "GeometryNodeGridDivergence": "GeometryNodeGridDivergence",
-        "GeometryNodeGridGradient": "GeometryNodeGridGradient",
-        "GeometryNodeGridInfo": "GeometryNodeGridInfo",
-        "GeometryNodeGridLaplacian": "GeometryNodeGridLaplacian",
-        "GeometryNodeGridPrune": "GeometryNodeGridPrune",
-        "GeometryNodeGridToMesh": "GeometryNodeGridToMesh",
-        "GeometryNodeGridVoxelize": "GeometryNodeGridVoxelize",
-        "GeometryNodeGroup": "GeometryNodeGroup",
-        "GeometryNodeImageInfo": "GeometryNodeImageInfo",
-        "GeometryNodeImageTexture": "GeometryNodeImageTexture",
-        "GeometryNodeImportCSV": "GeometryNodeImportCSV",
-        "GeometryNodeImportOBJ": "GeometryNodeImportOBJ",
-        "GeometryNodeImportPLY": "GeometryNodeImportPLY",
-        "GeometryNodeImportSTL": "GeometryNodeImportSTL",
-        "GeometryNodeImportText": "GeometryNodeImportText",
-        "GeometryNodeImportVDB": "GeometryNodeImportVDB",
-        "GeometryNodeIndexOfNearest": "GeometryNodeIndexOfNearest",
-        "GeometryNodeIndexSwitch": "GeometryNodeIndexSwitch",
-        "GeometryNodeInputActiveCamera": "GeometryNodeInputActiveCamera",
-        "GeometryNodeInputCollection": "GeometryNodeInputCollection",
-        "GeometryNodeInputCurveHandlePositions": "GeometryNodeInputCurveHandlePositions",
-        "GeometryNodeInputCurveTilt": "GeometryNodeInputCurveTilt",
-        "GeometryNodeInputEdgeSmooth": "GeometryNodeInputEdgeSmooth",
-        "GeometryNodeInputID": "GeometryNodeInputID",
-        "GeometryNodeInputImage": "GeometryNodeInputImage",
-        "GeometryNodeInputIndex": "GeometryNodeInputIndex",
-        "GeometryNodeInputInstanceBounds": "GeometryNodeInputInstanceBounds",
-        "GeometryNodeInputInstanceRotation": "GeometryNodeInputInstanceRotation",
-        "GeometryNodeInputInstanceScale": "GeometryNodeInputInstanceScale",
-        "GeometryNodeInputMaterial": "GeometryNodeInputMaterial",
-        "GeometryNodeInputMaterialIndex": "GeometryNodeInputMaterialIndex",
-        "GeometryNodeInputMeshEdgeAngle": "GeometryNodeInputMeshEdgeAngle",
-        "GeometryNodeInputMeshEdgeNeighbors": "GeometryNodeInputMeshEdgeNeighbors",
-        "GeometryNodeInputMeshEdgeVertices": "GeometryNodeInputMeshEdgeVertices",
-        "GeometryNodeInputMeshFaceArea": "GeometryNodeInputMeshFaceArea",
-        "GeometryNodeInputMeshFaceIsPlanar": "GeometryNodeInputMeshFaceIsPlanar",
-        "GeometryNodeInputMeshFaceNeighbors": "GeometryNodeInputMeshFaceNeighbors",
-        "GeometryNodeInputMeshIsland": "GeometryNodeInputMeshIsland",
-        "GeometryNodeInputMeshVertexNeighbors": "GeometryNodeInputMeshVertexNeighbors",
-        "GeometryNodeInputNamedAttribute": "GeometryNodeInputNamedAttribute",
-        "GeometryNodeInputNamedLayerSelection": "GeometryNodeInputNamedLayerSelection",
-        "GeometryNodeInputNormal": "GeometryNodeInputNormal",
-        "GeometryNodeInputObject": "GeometryNodeInputObject",
-        "GeometryNodeInputPosition": "GeometryNodeInputPosition",
-        "GeometryNodeInputRadius": "GeometryNodeInputRadius",
-        "GeometryNodeInputSceneTime": "GeometryNodeInputSceneTime",
-        "GeometryNodeInputShadeSmooth": "GeometryNodeInputShadeSmooth",
-        "GeometryNodeInputShortestEdgePaths": "GeometryNodeInputShortestEdgePaths",
-        "GeometryNodeInputSplineCyclic": "GeometryNodeInputSplineCyclic",
-        "GeometryNodeInputSplineResolution": "GeometryNodeInputSplineResolution",
-        "GeometryNodeInputTangent": "GeometryNodeInputTangent",
-        "GeometryNodeInputVoxelIndex": "GeometryNodeInputVoxelIndex",
-        "GeometryNodeInstanceOnPoints": "GeometryNodeInstanceOnPoints",
-        "GeometryNodeInstanceTransform": "GeometryNodeInstanceTransform",
-        "GeometryNodeInstancesToPoints": "GeometryNodeInstancesToPoints",
-        "GeometryNodeInterpolateCurves": "GeometryNodeInterpolateCurves",
-        "GeometryNodeIsViewport": "GeometryNodeIsViewport",
-        "GeometryNodeJoinGeometry": "GeometryNodeJoinGeometry",
-        "GeometryNodeList": "GeometryNodeList",
-        "GeometryNodeListGetItem": "GeometryNodeListGetItem",
-        "GeometryNodeListLength": "GeometryNodeListLength",
-        "GeometryNodeMaterialSelection": "GeometryNodeMaterialSelection",
-        "GeometryNodeMenuSwitch": "GeometryNodeMenuSwitch",
-        "GeometryNodeMergeByDistance": "GeometryNodeMergeByDistance",
-        "GeometryNodeMergeLayers": "GeometryNodeMergeLayers",
-        "GeometryNodeMeshBoolean": "GeometryNodeMeshBoolean",
-        "GeometryNodeMeshCircle": "GeometryNodeMeshCircle",
-        "GeometryNodeMeshCone": "GeometryNodeMeshCone",
-        "GeometryNodeMeshCube": "GeometryNodeMeshCube",
-        "GeometryNodeMeshCylinder": "GeometryNodeMeshCylinder",
-        "GeometryNodeMeshFaceSetBoundaries": "GeometryNodeMeshFaceSetBoundaries",
-        "GeometryNodeMeshGrid": "GeometryNodeMeshGrid",
-        "GeometryNodeMeshIcoSphere": "GeometryNodeMeshIcoSphere",
-        "GeometryNodeMeshLine": "GeometryNodeMeshLine",
-        "GeometryNodeMeshToCurve": "GeometryNodeMeshToCurve",
-        "GeometryNodeMeshToDensityGrid": "GeometryNodeMeshToDensityGrid",
-        "GeometryNodeMeshToPoints": "GeometryNodeMeshToPoints",
-        "GeometryNodeMeshToSDFGrid": "GeometryNodeMeshToSDFGrid",
-        "GeometryNodeMeshToVolume": "GeometryNodeMeshToVolume",
-        "GeometryNodeMeshUVSphere": "GeometryNodeMeshUVSphere",
-        "GeometryNodeObjectInfo": "GeometryNodeObjectInfo",
-        "GeometryNodeOffsetCornerInFace": "GeometryNodeOffsetCornerInFace",
-        "GeometryNodeOffsetPointInCurve": "GeometryNodeOffsetPointInCurve",
-        "GeometryNodePoints": "GeometryNodePoints",
-        "GeometryNodePointsOfCurve": "GeometryNodePointsOfCurve",
-        "GeometryNodePointsToCurves": "GeometryNodePointsToCurves",
-        "GeometryNodePointsToSDFGrid": "GeometryNodePointsToSDFGrid",
-        "GeometryNodePointsToVertices": "GeometryNodePointsToVertices",
-        "GeometryNodePointsToVolume": "GeometryNodePointsToVolume",
-        "GeometryNodeProximity": "GeometryNodeProximity",
-        "GeometryNodeRaycast": "GeometryNodeRaycast",
-        "GeometryNodeRealizeInstances": "GeometryNodeRealizeInstances",
-        "GeometryNodeRemoveAttribute": "GeometryNodeRemoveAttribute",
-        "GeometryNodeRepeatInput": "GeometryNodeRepeatInput",
-        "GeometryNodeRepeatOutput": "GeometryNodeRepeatOutput",
-        "GeometryNodeReplaceMaterial": "GeometryNodeReplaceMaterial",
-        "GeometryNodeResampleCurve": "GeometryNodeResampleCurve",
-        "GeometryNodeReverseCurve": "GeometryNodeReverseCurve",
-        "GeometryNodeRotateInstances": "GeometryNodeRotateInstances",
-        "GeometryNodeSDFGridBoolean": "GeometryNodeSDFGridBoolean",
-        "GeometryNodeSDFGridFillet": "GeometryNodeSDFGridFillet",
-        "GeometryNodeSDFGridLaplacian": "GeometryNodeSDFGridLaplacian",
-        "GeometryNodeSDFGridMean": "GeometryNodeSDFGridMean",
-        "GeometryNodeSDFGridMeanCurvature": "GeometryNodeSDFGridMeanCurvature",
-        "GeometryNodeSDFGridMedian": "GeometryNodeSDFGridMedian",
-        "GeometryNodeSDFGridOffset": "GeometryNodeSDFGridOffset",
-        "GeometryNodeSampleCurve": "GeometryNodeSampleCurve",
-        "GeometryNodeSampleGrid": "GeometryNodeSampleGrid",
-        "GeometryNodeSampleGridIndex": "GeometryNodeSampleGridIndex",
-        "GeometryNodeSampleIndex": "GeometryNodeSampleIndex",
-        "GeometryNodeSampleNearest": "GeometryNodeSampleNearest",
-        "GeometryNodeSampleNearestSurface": "GeometryNodeSampleNearestSurface",
-        "GeometryNodeSampleUVSurface": "GeometryNodeSampleUVSurface",
-        "GeometryNodeScaleElements": "GeometryNodeScaleElements",
-        "GeometryNodeScaleInstances": "GeometryNodeScaleInstances",
-        "GeometryNodeSelfObject": "GeometryNodeSelfObject",
-        "GeometryNodeSeparateComponents": "GeometryNodeSeparateComponents",
-        "GeometryNodeSeparateGeometry": "GeometryNodeSeparateGeometry",
-        "GeometryNodeSetCurveHandlePositions": "GeometryNodeSetCurveHandlePositions",
-        "GeometryNodeSetCurveNormal": "GeometryNodeSetCurveNormal",
-        "GeometryNodeSetCurveRadius": "GeometryNodeSetCurveRadius",
-        "GeometryNodeSetCurveTilt": "GeometryNodeSetCurveTilt",
-        "GeometryNodeSetGeometryName": "GeometryNodeSetGeometryName",
-        "GeometryNodeSetGreasePencilColor": "GeometryNodeSetGreasePencilColor",
-        "GeometryNodeSetGreasePencilDepth": "GeometryNodeSetGreasePencilDepth",
-        "GeometryNodeSetGreasePencilSoftness": "GeometryNodeSetGreasePencilSoftness",
-        "GeometryNodeSetGridBackground": "GeometryNodeSetGridBackground",
-        "GeometryNodeSetGridTransform": "GeometryNodeSetGridTransform",
-        "GeometryNodeSetID": "GeometryNodeSetID",
-        "GeometryNodeSetInstanceTransform": "GeometryNodeSetInstanceTransform",
-        "GeometryNodeSetMaterial": "GeometryNodeSetMaterial",
-        "GeometryNodeSetMaterialIndex": "GeometryNodeSetMaterialIndex",
-        "GeometryNodeSetMeshNormal": "GeometryNodeSetMeshNormal",
-        "GeometryNodeSetPointRadius": "GeometryNodeSetPointRadius",
-        "GeometryNodeSetPosition": "GeometryNodeSetPosition",
-        "GeometryNodeSetShadeSmooth": "GeometryNodeSetShadeSmooth",
-        "GeometryNodeSetSplineCyclic": "GeometryNodeSetSplineCyclic",
-        "GeometryNodeSetSplineResolution": "GeometryNodeSetSplineResolution",
-        "GeometryNodeSimulationInput": "GeometryNodeSimulationInput",
-        "GeometryNodeSimulationOutput": "GeometryNodeSimulationOutput",
-        "GeometryNodeSortElements": "GeometryNodeSortElements",
-        "GeometryNodeSplineLength": "GeometryNodeSplineLength",
-        "GeometryNodeSplineParameter": "GeometryNodeSplineParameter",
-        "GeometryNodeSplitEdges": "GeometryNodeSplitEdges",
-        "GeometryNodeSplitToInstances": "GeometryNodeSplitToInstances",
-        "GeometryNodeStoreNamedAttribute": "GeometryNodeStoreNamedAttribute",
-        "GeometryNodeStoreNamedGrid": "GeometryNodeStoreNamedGrid",
-        "GeometryNodeStringJoin": "GeometryNodeStringJoin",
-        "GeometryNodeStringToCurves": "GeometryNodeStringToCurves",
-        "GeometryNodeSubdivideCurve": "GeometryNodeSubdivideCurve",
-        "GeometryNodeSubdivideMesh": "GeometryNodeSubdivideMesh",
-        "GeometryNodeSubdivisionSurface": "GeometryNodeSubdivisionSurface",
-        "GeometryNodeSwitch": "GeometryNodeSwitch",
-        "GeometryNodeTool3DCursor": "GeometryNodeTool3DCursor",
-        "GeometryNodeToolActiveElement": "GeometryNodeToolActiveElement",
-        "GeometryNodeToolFaceSet": "GeometryNodeToolFaceSet",
-        "GeometryNodeToolMousePosition": "GeometryNodeToolMousePosition",
-        "GeometryNodeToolSelection": "GeometryNodeToolSelection",
-        "GeometryNodeToolSetFaceSet": "GeometryNodeToolSetFaceSet",
-        "GeometryNodeToolSetSelection": "GeometryNodeToolSetSelection",
-        "GeometryNodeTransform": "GeometryNodeTransform",
-        "GeometryNodeTranslateInstances": "GeometryNodeTranslateInstances",
-        "GeometryNodeTree": "GeometryNodeTree",
-        "GeometryNodeTriangulate": "GeometryNodeTriangulate",
-        "GeometryNodeTrimCurve": "GeometryNodeTrimCurve",
-        "GeometryNodeUVPackIslands": "GeometryNodeUVPackIslands",
-        "GeometryNodeUVTangent": "GeometryNodeUVTangent",
-        "GeometryNodeUVUnwrap": "GeometryNodeUVUnwrap",
-        "GeometryNodeVertexOfCorner": "GeometryNodeVertexOfCorner",
-        "GeometryNodeViewer": "GeometryNodeViewer",
-        "GeometryNodeViewportTransform": "GeometryNodeViewportTransform",
-        "GeometryNodeVolumeCube": "GeometryNodeVolumeCube",
-        "GeometryNodeVolumeToMesh": "GeometryNodeVolumeToMesh",
-        "GeometryNodeWarning": "GeometryNodeWarning",
-        "GeometryToInstance": "GeometryNodeGeometryToInstance",
-        "GetNamedGrid": "GeometryNodeGetNamedGrid",
-        "GizmoDial": "GeometryNodeGizmoDial",
-        "GizmoLinear": "GeometryNodeGizmoLinear",
-        "GizmoTransform": "GeometryNodeGizmoTransform",
-        "GreasePencilToCurves": "GeometryNodeGreasePencilToCurves",
-        "GridAdvect": "GeometryNodeGridAdvect",
-        "GridCurl": "GeometryNodeGridCurl",
-        "GridDivergence": "GeometryNodeGridDivergence",
-        "GridGradient": "GeometryNodeGridGradient",
-        "GridInfo": "GeometryNodeGridInfo",
-        "GridLaplacian": "GeometryNodeGridLaplacian",
-        "GridPrune": "GeometryNodeGridPrune",
-        "GridToMesh": "GeometryNodeGridToMesh",
-        "GridVoxelize": "GeometryNodeGridVoxelize",
-        "Group": "GeometryNodeGroup",
-        "ImageInfo": "GeometryNodeImageInfo",
-        "ImageTexture": "GeometryNodeImageTexture",
-        "ImportCSV": "GeometryNodeImportCSV",
-        "ImportOBJ": "GeometryNodeImportOBJ",
-        "ImportPLY": "GeometryNodeImportPLY",
-        "ImportSTL": "GeometryNodeImportSTL",
-        "ImportText": "GeometryNodeImportText",
-        "ImportVDB": "GeometryNodeImportVDB",
-        "IndexOfNearest": "GeometryNodeIndexOfNearest",
-        "IndexSwitch": "GeometryNodeIndexSwitch",
-        "InputActiveCamera": "GeometryNodeInputActiveCamera",
-        "InputCollection": "GeometryNodeInputCollection",
-        "InputCurveHandlePositions": "GeometryNodeInputCurveHandlePositions",
-        "InputCurveTangent": "GeometryNodeInputTangent",
-        "InputCurveTilt": "GeometryNodeInputCurveTilt",
-        "InputEdgeSmooth": "GeometryNodeInputEdgeSmooth",
-        "InputEdgeVertices": "GeometryNodeInputMeshEdgeVertices",
-        "InputID": "GeometryNodeInputID",
-        "InputImage": "GeometryNodeInputImage",
-        "InputIndex": "GeometryNodeInputIndex",
-        "InputInstanceBounds": "GeometryNodeInputInstanceBounds",
-        "InputInstanceRotation": "GeometryNodeInputInstanceRotation",
-        "InputInstanceScale": "GeometryNodeInputInstanceScale",
-        "InputMaterial": "GeometryNodeInputMaterial",
-        "InputMaterialIndex": "GeometryNodeInputMaterialIndex",
-        "InputMeshEdgeAngle": "GeometryNodeInputMeshEdgeAngle",
-        "InputMeshEdgeNeighbors": "GeometryNodeInputMeshEdgeNeighbors",
-        "InputMeshEdgeVertices": "GeometryNodeInputMeshEdgeVertices",
-        "InputMeshFaceArea": "GeometryNodeInputMeshFaceArea",
-        "InputMeshFaceIsPlanar": "GeometryNodeInputMeshFaceIsPlanar",
-        "InputMeshFaceNeighbors": "GeometryNodeInputMeshFaceNeighbors",
-        "InputMeshIsland": "GeometryNodeInputMeshIsland",
-        "InputMeshVertexNeighbors": "GeometryNodeInputMeshVertexNeighbors",
-        "InputNamedAttribute": "GeometryNodeInputNamedAttribute",
-        "InputNamedLayerSelection": "GeometryNodeInputNamedLayerSelection",
-        "InputNormal": "GeometryNodeInputNormal",
-        "InputObject": "GeometryNodeInputObject",
-        "InputPosition": "GeometryNodeInputPosition",
-        "InputRadius": "GeometryNodeInputRadius",
-        "InputSceneTime": "GeometryNodeInputSceneTime",
-        "InputShadeSmooth": "GeometryNodeInputShadeSmooth",
-        "InputShortestEdgePaths": "GeometryNodeInputShortestEdgePaths",
-        "InputSplineCyclic": "GeometryNodeInputSplineCyclic",
-        "InputSplineResolution": "GeometryNodeInputSplineResolution",
-        "InputTangent": "GeometryNodeInputTangent",
-        "InputVoxelIndex": "GeometryNodeInputVoxelIndex",
-        "InstanceOnPoints": "GeometryNodeInstanceOnPoints",
-        "InstanceTransform": "GeometryNodeInstanceTransform",
-        "InstancesToPoints": "GeometryNodeInstancesToPoints",
-        "InterpolateCurves": "GeometryNodeInterpolateCurves",
-        "IsViewport": "GeometryNodeIsViewport",
-        "JoinGeometry": "GeometryNodeJoinGeometry",
-        "List": "GeometryNodeList",
-        "ListGetItem": "GeometryNodeListGetItem",
-        "ListLength": "GeometryNodeListLength",
-        "MaterialSelection": "GeometryNodeMaterialSelection",
-        "MenuSwitch": "GeometryNodeMenuSwitch",
-        "MergeByDistance": "GeometryNodeMergeByDistance",
-        "MergeLayers": "GeometryNodeMergeLayers",
-        "MeshBoolean": "GeometryNodeMeshBoolean",
-        "MeshCircle": "GeometryNodeMeshCircle",
-        "MeshCone": "GeometryNodeMeshCone",
-        "MeshCube": "GeometryNodeMeshCube",
-        "MeshCylinder": "GeometryNodeMeshCylinder",
-        "MeshFaceSetBoundaries": "GeometryNodeMeshFaceSetBoundaries",
-        "MeshGrid": "GeometryNodeMeshGrid",
-        "MeshIcoSphere": "GeometryNodeMeshIcoSphere",
-        "MeshLine": "GeometryNodeMeshLine",
-        "MeshToCurve": "GeometryNodeMeshToCurve",
-        "MeshToDensityGrid": "GeometryNodeMeshToDensityGrid",
-        "MeshToPoints": "GeometryNodeMeshToPoints",
-        "MeshToSDFGrid": "GeometryNodeMeshToSDFGrid",
-        "MeshToVolume": "GeometryNodeMeshToVolume",
-        "MeshUVSphere": "GeometryNodeMeshUVSphere",
-        "ObjectInfo": "GeometryNodeObjectInfo",
-        "OffsetCornerInFace": "GeometryNodeOffsetCornerInFace",
-        "OffsetPointInCurve": "GeometryNodeOffsetPointInCurve",
-        "Points": "GeometryNodePoints",
-        "PointsOfCurve": "GeometryNodePointsOfCurve",
-        "PointsToCurves": "GeometryNodePointsToCurves",
-        "PointsToSDFGrid": "GeometryNodePointsToSDFGrid",
-        "PointsToVertices": "GeometryNodePointsToVertices",
-        "PointsToVolume": "GeometryNodePointsToVolume",
-        "Proximity": "GeometryNodeProximity",
-        "Raycast": "GeometryNodeRaycast",
-        "RealizeInstances": "GeometryNodeRealizeInstances",
-        "RemoveAttribute": "GeometryNodeRemoveAttribute",
-        "RepeatInput": "GeometryNodeRepeatInput",
-        "RepeatOutput": "GeometryNodeRepeatOutput",
-        "ReplaceMaterial": "GeometryNodeReplaceMaterial",
-        "ResampleCurve": "GeometryNodeResampleCurve",
-        "ReverseCurve": "GeometryNodeReverseCurve",
-        "RotateInstances": "GeometryNodeRotateInstances",
-        "SDFGridBoolean": "GeometryNodeSDFGridBoolean",
-        "SDFGridFillet": "GeometryNodeSDFGridFillet",
-        "SDFGridLaplacian": "GeometryNodeSDFGridLaplacian",
-        "SDFGridMean": "GeometryNodeSDFGridMean",
-        "SDFGridMeanCurvature": "GeometryNodeSDFGridMeanCurvature",
-        "SDFGridMedian": "GeometryNodeSDFGridMedian",
-        "SDFGridOffset": "GeometryNodeSDFGridOffset",
-        "SampleCurve": "GeometryNodeSampleCurve",
-        "SampleGrid": "GeometryNodeSampleGrid",
-        "SampleGridIndex": "GeometryNodeSampleGridIndex",
-        "SampleIndex": "GeometryNodeSampleIndex",
-        "SampleNearest": "GeometryNodeSampleNearest",
-        "SampleNearestSurface": "GeometryNodeSampleNearestSurface",
-        "SampleUVSurface": "GeometryNodeSampleUVSurface",
-        "ScaleElements": "GeometryNodeScaleElements",
-        "ScaleInstances": "GeometryNodeScaleInstances",
-        "SelfObject": "GeometryNodeSelfObject",
-        "SeparateComponents": "GeometryNodeSeparateComponents",
-        "SeparateGeometry": "GeometryNodeSeparateGeometry",
-        "SetCurveHandlePositions": "GeometryNodeSetCurveHandlePositions",
-        "SetCurveNormal": "GeometryNodeSetCurveNormal",
-        "SetCurveRadius": "GeometryNodeSetCurveRadius",
-        "SetCurveTilt": "GeometryNodeSetCurveTilt",
-        "SetGeometryName": "GeometryNodeSetGeometryName",
-        "SetGreasePencilColor": "GeometryNodeSetGreasePencilColor",
-        "SetGreasePencilDepth": "GeometryNodeSetGreasePencilDepth",
-        "SetGreasePencilSoftness": "GeometryNodeSetGreasePencilSoftness",
-        "SetGridBackground": "GeometryNodeSetGridBackground",
-        "SetGridTransform": "GeometryNodeSetGridTransform",
-        "SetID": "GeometryNodeSetID",
-        "SetInstanceTransform": "GeometryNodeSetInstanceTransform",
-        "SetMaterial": "GeometryNodeSetMaterial",
-        "SetMaterialIndex": "GeometryNodeSetMaterialIndex",
-        "SetMeshNormal": "GeometryNodeSetMeshNormal",
-        "SetPointRadius": "GeometryNodeSetPointRadius",
-        "SetPosition": "GeometryNodeSetPosition",
-        "SetShadeSmooth": "GeometryNodeSetShadeSmooth",
-        "SetSplineCyclic": "GeometryNodeSetSplineCyclic",
-        "SetSplineResolution": "GeometryNodeSetSplineResolution",
-        "SimulationInput": "GeometryNodeSimulationInput",
-        "SimulationOutput": "GeometryNodeSimulationOutput",
-        "SortElements": "GeometryNodeSortElements",
-        "SplineLength": "GeometryNodeSplineLength",
-        "SplineParameter": "GeometryNodeSplineParameter",
-        "SplitEdges": "GeometryNodeSplitEdges",
-        "SplitToInstances": "GeometryNodeSplitToInstances",
-        "StoreNamedAttribute": "GeometryNodeStoreNamedAttribute",
-        "StoreNamedGrid": "GeometryNodeStoreNamedGrid",
-        "StringJoin": "GeometryNodeStringJoin",
-        "StringToCurves": "GeometryNodeStringToCurves",
-        "SubdivideCurve": "GeometryNodeSubdivideCurve",
-        "SubdivideMesh": "GeometryNodeSubdivideMesh",
-        "SubdivisionSurface": "GeometryNodeSubdivisionSurface",
-        "Switch": "GeometryNodeSwitch",
-        "Tool3DCursor": "GeometryNodeTool3DCursor",
-        "ToolActiveElement": "GeometryNodeToolActiveElement",
-        "ToolFaceSet": "GeometryNodeToolFaceSet",
-        "ToolMousePosition": "GeometryNodeToolMousePosition",
-        "ToolSelection": "GeometryNodeToolSelection",
-        "ToolSetFaceSet": "GeometryNodeToolSetFaceSet",
-        "ToolSetSelection": "GeometryNodeToolSetSelection",
-        "Transform": "GeometryNodeTransform",
-        "TranslateInstances": "GeometryNodeTranslateInstances",
-        "Tree": "GeometryNodeTree",
-        "Triangulate": "GeometryNodeTriangulate",
-        "TrimCurve": "GeometryNodeTrimCurve",
-        "UVPackIslands": "GeometryNodeUVPackIslands",
-        "UVTangent": "GeometryNodeUVTangent",
-        "UVUnwrap": "GeometryNodeUVUnwrap",
-        "VertexOfCorner": "GeometryNodeVertexOfCorner",
-        "Viewer": "GeometryNodeViewer",
-        "ViewportTransform": "GeometryNodeViewportTransform",
-        "VolumeCube": "GeometryNodeVolumeCube",
-        "VolumeToMesh": "GeometryNodeVolumeToMesh",
-        "Warning": "GeometryNodeWarning",
-    },
-    # ==========================================================================
-    # 2. Shader & Compositor Nodes (Standard Defaults)
-    # ==========================================================================
-    "ShaderNodeTree": {
-        "GeometryNodeInputNoiseTexture": "ShaderNodeTexNoise",
-        "GeometryNodeInputVoronoiTexture": "ShaderNodeTexVoronoi",
-        "GeometryNodeInputWaveTexture": "ShaderNodeTexWave",
-        "GeometryNodeInputMagicTexture": "ShaderNodeTexMagic",
-        "GeometryNodeInputCheckerTexture": "ShaderNodeTexChecker",
-        "GeometryNodeInputGradientTexture": "ShaderNodeTexGradient",
-        "GeometryNodeInputWhiteNoise": "ShaderNodeTexWhiteNoise",
-        "GeometryNodeInputBrickTexture": "ShaderNodeTexBrick",
-        "GeometryNodeMath": "ShaderNodeMath",
-        "GeometryNodeVectorMath": "ShaderNodeVectorMath",
-        "GeometryNodeMix": "ShaderNodeMix",
-        "GeometryNodeValToRGB": "ShaderNodeValToRGB",
-        "GeometryNodeCurveRGB": "ShaderNodeRGBCurve",
-        "GeometryNodeCurveVector": "ShaderNodeVectorCurve",
-        "GeometryNodeMapRange": "ShaderNodeMapRange",
-        "GeometryNodeClamp": "ShaderNodeClamp",
-        "GeometryNodeInputRGB": "ShaderNodeRGB",
-        "GeometryNodeInputValue": "ShaderNodeValue",
-        "FunctionNodeInputBool": "ShaderNodeValue",
-        "FunctionNodeInputInt": "ShaderNodeValue",
-        "GeometryNodeInputPosition": "ShaderNodeNewGeometry",
-        "GeometryNodeInputNormal": "ShaderNodeNewGeometry",
-        "GeometryNodeInputTangent": "ShaderNodeNewGeometry",
-        "GeometryNodeInputUVMap": "ShaderNodeUVMap",
-        "GeometryNodeObjectInfo": "ShaderNodeObjectInfo",
-        "GeometryNodeInputNamedAttribute": "ShaderNodeAttribute"
-    },
-    "CompositorNodeTree": {
-        "ShaderNodeMath": "CompositorNodeMath",
-        "GeometryNodeMath": "CompositorNodeMath",
-        "ShaderNodeVectorMath": "CompositorNodeVectorMath",
-        "ShaderNodeMix": "CompositorNodeMixRGB",
-        "ShaderNodeValToRGB": "CompositorNodeValToRGB",
-        "ShaderNodeRGBCurve": "CompositorNodeCurveRGB",
-        "ShaderNodeMapRange": "CompositorNodeMapRange",
-        "ShaderNodeValue": "CompositorNodeValue",
-        "ShaderNodeRGB": "CompositorNodeRGB",
-        "ShaderNodeCombineRGB": "CompositorNodeCombineColor",
-        "ShaderNodeSeparateRGB": "CompositorNodeSeparateColor"
+# ==============================================================================
+# 配置：数据库标准命名
+# ==============================================================================
+DB_FILENAME = "blender_node_schema.json"
+
+# ==============================================================================
+# 全局缓存 (运行时加载，避免重复IO)
+# ==============================================================================
+_DB_NODES = {}      # 节点详细信息库
+_DB_ALIASES = {}    # 别名反向查找表 (UI名/旧名 -> 真实ID)
+_DB_META = {}       # 元数据 (包含 socket_map 等)
+
+def load_db():
+    """
+    加载标准数据库文件。
+    该文件应由 extract_blender_nodes.py 生成并放入插件目录。
+    """
+    global _DB_NODES, _DB_ALIASES, _DB_META
+    
+    # 如果已加载，直接返回 True
+    if _DB_NODES:
+        return True
+
+    # 获取当前脚本所在目录的 JSON 路径
+    json_path = os.path.join(os.path.dirname(__file__), DB_FILENAME)
+    
+    if not os.path.exists(json_path):
+        print(f"[GeoNeural] 严重错误: 找不到数据库文件 '{DB_FILENAME}'")
+        print(f"[GeoNeural] 请运行提取脚本并将生成的 JSON 放入插件目录。")
+        return False
+
+    try:
+        with open(json_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+            
+            # 1. 加载节点数据
+            _DB_NODES = data.get("nodes", {})
+            
+            # 2. 加载别名映射 (UI Name -> bl_idname)
+            _DB_ALIASES = data.get("alias_map", {})
+            
+            # 3. 加载元数据 (包含 Socket 类型映射表)
+            _DB_META = data.get("meta", {})
+            
+            print(f"[GeoNeural] 数据库已加载: {_DB_META.get('version', '未知版本')}")
+            print(f"   - 节点数量: {len(_DB_NODES)}")
+            print(f"   - 索引条目: {len(_DB_ALIASES)}")
+            return True
+            
+    except Exception as e:
+        print(f"[GeoNeural] JSON 解析错误: {e}")
+        return False
+
+def resolve_node_id(name):
+    """
+    核心功能：将任意名称（UI名、旧枚举名、简化名）解析为真实的 bl_idname。
+    完全依赖数据库中的 alias_map。
+    """
+    # 确保数据库已加载
+    if not _DB_ALIASES: 
+        if not load_db(): return name # 加载失败则原样返回
+    
+    # 1. 精确匹配 (最快)
+    if name in _DB_ALIASES:
+        return _DB_ALIASES[name]
+    
+    # 2. 容错匹配 (去空格，例如 "Join Geometry" -> "JoinGeometry")
+    if name:
+        no_space = name.replace(" ", "")
+        if no_space in _DB_ALIASES:
+            return _DB_ALIASES[no_space]
+        
+        # 3. 容错匹配 (全大写下划线，针对旧代码风格，如 "JOIN_GEOMETRY")
+        upper_snake = name.upper().replace(" ", "_")
+        if upper_snake in _DB_ALIASES:
+            return _DB_ALIASES[upper_snake]
+        
+    # 查不到则原样返回，交由 Blender 尝试处理
+    return name
+
+def get_node_info(bl_idname):
+    """
+    获取节点的完整 Schema 信息 (包含 inputs, outputs, properties)。
+    """
+    if not _DB_NODES: load_db()
+    return _DB_NODES.get(bl_idname, {})
+
+def get_socket_type_map():
+    """
+    获取 C++ 类型到 Python 类型的映射表。
+    例如: "Vector" -> "NodeSocketVector"
+    """
+    if not _DB_META: load_db()
+    return _DB_META.get("socket_map", {})
+
+def get_zone_api_type(bl_socket_type):
+    """
+    [新增] 将 Python Socket 类型转换为 Repeat/Simulation Zone API 需要的枚举。
+    例如: "NodeSocketVector" -> "VECTOR"
+    """
+    # 移除前缀
+    raw = bl_socket_type.replace("NodeSocket", "").upper()
+    
+    # 特殊映射表 (Blender API 特异性)
+    MAPPING = {
+        "BOOL": "BOOLEAN",
+        "COLOR": "RGBA",       # Blender Zone API 中使用 RGBA 而非 COLOR
+        "INT": "INT",
+        "FLOAT": "FLOAT",
+        "VECTOR": "VECTOR",
+        "STRING": "STRING",
+        "OBJECT": "OBJECT",
+        "COLLECTION": "COLLECTION",
+        "IMAGE": "IMAGE",
+        "MATERIAL": "MATERIAL",
+        "GEOMETRY": "GEOMETRY",
+        "ROTATION": "ROTATION",
+        "MATRIX": "MATRIX"
     }
-}
+    return MAPPING.get(raw, "FLOAT") # 默认安全回退到 FLOAT
+
+def validate_enum(prop_name, value, prop_info):
+    """
+    校验枚举值是否合法。
+    数据库 V10 已经将全局枚举展开到了 prop_info['options'] 中。
+    """
+    options = prop_info.get("options", [])
+    
+    # 如果 Schema 中没有定义选项（空列表），则默认不做限制，返回 True
+    if not options: 
+        return True 
+    
+    # 1. 精确匹配
+    if value in options: 
+        return True
+    
+    # 2. 大写匹配 (解决 AI 输出小写 "z_up" 但 Blender 需要 "Z_UP" 的情况)
+    if isinstance(value, str) and value.upper() in options: 
+        return True
+    
+    return False
