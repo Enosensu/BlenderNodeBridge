@@ -1,10 +1,10 @@
 bl_info = {
-    "name": "GeoNeural Bridge (v5.8.0 Visual Perfect)",
+    "name": "GeoNeural Bridge (v5.9.0 Smart Input)",
     "author": "Dev_Nodes_V5",
-    "version": (5, 8, 0),
+    "version": (5, 9, 0),
     "blender": (4, 0, 0),
     "location": "Node Editor > Sidebar > GeoNeural",
-    "description": "基于 V9.0 核心，修复组框颜色丢失问题，实现 1:1 像素级视觉还原。",
+    "description": "基于 V9.0 核心，新增智能端口路由算法，自动修正 AI 的输入索引偏移。",
     "category": "Node",
 }
 
@@ -118,7 +118,7 @@ class SpecialHandlers:
         if output_node.id_data: output_node.id_data.update_tag()
 
 # ==============================================================================
-# 3. 序列化引擎
+# 3. 序列化引擎 (Serialization Engine)
 # ==============================================================================
 
 class SerializationEngine:
@@ -153,8 +153,6 @@ class SerializationEngine:
     def _serialize_node(self, node):
         d = {"name": node.name, "type": node.bl_idname, "params": {}, "inputs": {}}
         ALWAYS_EXCLUDE = {'rna_type', 'node_tree', 'inputs', 'outputs', 'interface', 'dimensions', 'is_active_output'}
-        
-        # 紧凑模式黑名单: 剔除视觉/UI属性
         COMPACT_EXCLUDE = {
             'name', 'location', 'width', 'height', 'select', 'location_absolute', 
             'warning_propagation', 'color_tag', 'width_hidden', 'internal_links', 
@@ -163,7 +161,6 @@ class SerializationEngine:
 
         for prop in node.bl_rna.properties.keys():
             if prop in ALWAYS_EXCLUDE: continue
-            
             if self.compact:
                 if prop in COMPACT_EXCLUDE: continue
                 if prop.startswith(('bl_', 'show_', '_')): continue
@@ -199,9 +196,7 @@ class SerializationEngine:
                     d["socket_props"][key] = s_props
             
             d["location"] = [int(node.location.x), int(node.location.y)]
-            # 确保 NodeFrame 的视觉尺寸被导出
-            if node.bl_idname == 'NodeFrame': 
-                d["width"], d["height"] = node.width, node.height
+            if node.bl_idname == 'NodeFrame': d["width"], d["height"] = node.width, node.height
                 
         if node.parent: d["parent"] = node.parent.name
         return d
@@ -247,7 +242,6 @@ class ConstructionEngine:
         if node is None and final_type != raw_type:
             try: node = self.tree.nodes.new(raw_type)
             except: pass
-        
         if node is None:
             if "Proximity" in raw_type and "Geometry" in raw_type:
                 try: node = self.tree.nodes.new("GeometryNodeProximity")
@@ -273,61 +267,79 @@ class ConstructionEngine:
         params = n_data.get("params", {})
         raw_loc = n_data.get("location_absolute", n_data.get("location", params.get("location")))
         
-        # 1. 恢复位置
         if raw_loc and isinstance(raw_loc, list) and len(raw_loc) == 2:
             self.has_valid_location = True
             node.location = (raw_loc[0] + offset[0], raw_loc[1] + offset[1])
             
-        # [V5.8 Fix] 显式恢复 NodeFrame 视觉属性 (强制应用)
-        # 即使通用设置器失败，这里也能确保颜色被还原
         if node.bl_idname == 'NodeFrame':
-            # 尺寸
             if "width" in n_data: node.width = n_data["width"]
             if "height" in n_data: node.height = n_data["height"]
-            
-            # 注释
             if "label" in params: node.label = params["label"]
             if "label_size" in params: node.label_size = int(params["label_size"])
             if "shrink" in params: node.shrink = bool(params["shrink"])
-            
-            # 颜色 (关键修复: 确保先开启 use_custom_color 再设置 color)
-            if "use_custom_color" in params:
-                node.use_custom_color = bool(params["use_custom_color"])
+            if "use_custom_color" in params: node.use_custom_color = bool(params["use_custom_color"])
             if "color" in params and node.use_custom_color:
                 col = params["color"]
                 if len(col) >= 3: node.color = (col[0], col[1], col[2])
 
-        # 2. 设置通用参数
         for k, v in params.items():
             if k in {"location", "width", "height"}: continue
-            
-            # NodeFrame 的视觉属性已在上面显式处理，这里跳过以防冲突
-            if node.bl_idname == 'NodeFrame' and k in {'color', 'use_custom_color', 'label', 'label_size', 'shrink'}:
-                continue
-
+            if node.bl_idname == 'NodeFrame' and k in {'color', 'use_custom_color', 'label', 'label_size', 'shrink'}: continue
             if isinstance(v, dict) and "__type__" in v:
                 if v["__type__"] == "ColorRamp": SpecialHandlers.build_color_ramp(getattr(node, k, None), v["data"])
                 continue
-            
             node_mappings.universal_set_property(node, k, v)
 
-        # 3. 设置端口默认值
+        # [V5.9.0 核心修复] 智能端口路由算法
         inputs_data = n_data.get("inputs", {})
         sock_map = {s.name: s for s in node.inputs}
-        for s in node.inputs: 
+        # 同时记录 ID 映射，以防万一
+        for s in node.inputs:
             if hasattr(s, "identifier"): sock_map[s.identifier] = s
             
+        assigned_sockets = set() # 记录已赋值的端口，防止重复覆盖
+
         for k, v in inputs_data.items():
+            target_socket = None
+            
+            # 策略 1: 精确匹配 (ID 或 Name)
             if k in sock_map:
-                s = sock_map[k]
+                target_socket = sock_map[k]
+            
+            # 策略 2: 智能偏移纠错 (解决 Value_002 -> Value_001 -> Value)
+            if not target_socket:
+                match = re.match(r"(.*)_(\d{3})$", k)
+                if match:
+                    base_name, num_str = match.groups()
+                    num = int(num_str)
+                    # 尝试递减后缀寻找最佳匹配
+                    # 例如 AI 说 Value_002, 我们依次找 Value_002 -> Value_001 -> Value
+                    candidates = []
+                    for i in range(num, -1, -1):
+                        cand_name = base_name if i == 0 else f"{base_name}_{i:03d}"
+                        if cand_name in sock_map:
+                            candidates.append(sock_map[cand_name])
+                    
+                    # 在候选者中，优先选择【未连接】且【未赋值】的端口
+                    for cand in candidates:
+                        if not cand.is_linked and cand.identifier not in assigned_sockets:
+                            target_socket = cand
+                            break
+                    # 如果都连了线，退而求其次，选第一个存在的
+                    if not target_socket and candidates:
+                        target_socket = candidates[0]
+
+            # 执行赋值
+            if target_socket:
                 try:
-                    if s.type == 'OBJECT' and isinstance(v, str): s.default_value = bpy.data.objects.get(v)
-                    elif s.type == 'MATERIAL' and isinstance(v, str): s.default_value = bpy.data.materials.get(v)
-                    elif s.type == 'IMAGE' and isinstance(v, str): s.default_value = bpy.data.images.get(v)
-                    else: s.default_value = v
+                    assigned_sockets.add(target_socket.identifier) # 标记为已占用
+                    if not target_socket.is_linked: # 只有未连接时才设置值，避免破坏逻辑
+                        if target_socket.type == 'OBJECT' and isinstance(v, str): target_socket.default_value = bpy.data.objects.get(v)
+                        elif target_socket.type == 'MATERIAL' and isinstance(v, str): target_socket.default_value = bpy.data.materials.get(v)
+                        elif target_socket.type == 'IMAGE' and isinstance(v, str): target_socket.default_value = bpy.data.images.get(v)
+                        else: target_socket.default_value = v
                 except: pass
         
-        # 4. 恢复 Socket 属性
         socket_props = n_data.get("socket_props", {})
         for k, props in socket_props.items():
             if k in sock_map:
@@ -455,7 +467,7 @@ class GN_OT_Build(bpy.types.Operator):
         return {'FINISHED'}
 
 class GN_PT_Panel(bpy.types.Panel):
-    bl_label = "GeoNeural 节点助手 v5.8.0"
+    bl_label = "GeoNeural 节点助手 v5.9.0"
     bl_idname = "GN_PT_main"
     bl_space_type = 'NODE_EDITOR' 
     bl_region_type = 'UI'
