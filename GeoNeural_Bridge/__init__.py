@@ -1,10 +1,10 @@
 bl_info = {
-    "name": "GeoNeural Bridge (v5.1.0 Universal)",
+    "name": "GeoNeural Bridge (v5.4.0 AI-Optimized)",
     "author": "Dev_Nodes_V5",
-    "version": (5, 1, 0),
+    "version": (5, 4, 0),
     "blender": (4, 0, 0),
     "location": "Node Editor > Sidebar > GeoNeural",
-    "description": "基于 v4.2 架构，集成 V5.1 强制属性写入内核与全量数据库支持。",
+    "description": "基于 v4.2 架构，完美复刻 v4.0.13 的 AI 精简模式与布局体验。",
     "category": "Node",
 }
 
@@ -122,7 +122,7 @@ class SpecialHandlers:
         if output_node.id_data: output_node.id_data.update_tag()
 
 # ==============================================================================
-# 3. 序列化引擎 (Serialization Engine)
+# 3. 序列化引擎 (Serialization Engine) - 完美复刻 v4.0.13 精简逻辑
 # ==============================================================================
 
 class SerializationEngine:
@@ -156,9 +156,36 @@ class SerializationEngine:
 
     def _serialize_node(self, node):
         d = {"name": node.name, "type": node.bl_idname, "params": {}, "inputs": {}}
+        
+        # [v4.0.13 复刻] 严格的排除列表
+        ALWAYS_EXCLUDE = {'rna_type', 'node_tree', 'inputs', 'outputs', 'interface', 'dimensions', 'is_active_output'}
+        
+        # 在紧凑模式下，这些属性绝对不导出
+        COMPACT_EXCLUDE = {
+            'name', 'location', 'width', 'height', 'select', 'location_absolute', 
+            'warning_propagation', 'color_tag', 'width_hidden', 'internal_links', 
+            'color', 'use_custom_color', 'hide', 'hide_value'
+        }
+
+        # 获取数据库中的 Schema 信息，用于智能过滤
+        node_schema = node_mappings.get_node_info(node.bl_idname)
+        known_props = node_schema.get("properties", {})
+
         for prop in node.bl_rna.properties.keys():
-            if prop in {'rna_type', 'node_tree', 'inputs', 'outputs', 'interface', 'dimensions', 'is_active_output'}: continue
-            if self.compact and prop in {'location', 'width', 'height', 'select', 'color', 'use_custom_color'}: continue
+            if prop in ALWAYS_EXCLUDE: continue
+            
+            # [核心复刻] 紧凑模式下的智能删减
+            if self.compact:
+                if prop in COMPACT_EXCLUDE: continue
+                if prop.startswith(('bl_', 'show_', '_')): continue
+                
+                # 保留关键逻辑属性：label (注释), mute (静音)
+                if prop in {'label', 'mute'}: pass
+                # 保留已知的功能属性 (存在于 Schema 中)
+                elif prop in known_props: pass
+                # 丢弃未知的 UI 属性 (减少 Token 消耗)
+                else: continue
+
             try:
                 val = getattr(node, prop)
                 if isinstance(val, bpy.types.ColorRamp):
@@ -172,6 +199,7 @@ class SerializationEngine:
             d["is_zone"] = True
             d["zone_interface"] = [{"name": o.name, "socket_type": o.bl_idname} for o in node.outputs if o.bl_idname != "NodeSocketVirtual" and o.name not in SpecialHandlers.BUILTIN_SOCKETS]
 
+        # 端口默认值 (始终保留)
         for inp in node.inputs:
             if not inp.is_linked and hasattr(inp, "default_value"):
                 val = DataUtils.clean_data(inp.default_value)
@@ -179,9 +207,24 @@ class SerializationEngine:
                     key = inp.identifier if hasattr(inp, "identifier") else inp.name
                     d["inputs"][key] = val
         
+        # [v4.0.13 复刻] Socket 属性 (hide/hide_value)
+        # 仅在非紧凑模式下导出，帮助还原视觉状态
+        if not self.compact:
+            d["socket_props"] = {}
+            for s in node.inputs:
+                s_props = {}
+                if s.hide: s_props["hide"] = True
+                if s.hide_value: s_props["hide_value"] = True
+                if s_props:
+                    key = s.identifier if hasattr(s, "identifier") else s.name
+                    d["socket_props"][key] = s_props
+
+        # 位置与尺寸 (非紧凑模式保留)
         if not self.compact:
             d["location"] = [int(node.location.x), int(node.location.y)]
-            if node.bl_idname == 'NodeFrame': d["width"], d["height"] = node.width, node.height
+            if node.bl_idname == 'NodeFrame': 
+                d["width"], d["height"] = node.width, node.height
+                
         if node.parent: d["parent"] = node.parent.name
         return d
 
@@ -194,6 +237,7 @@ class ConstructionEngine:
         self.tree = tree
         self.node_map = {}
         self.created_nodes = []
+        self.has_valid_location = False
 
     def build(self, json_data, clear=False, offset=(0,0)):
         if clear: self.tree.nodes.clear()
@@ -201,14 +245,21 @@ class ConstructionEngine:
         if "root" in json_data and isinstance(json_data["root"], dict):
             nodes_data = json_data["root"].get("nodes", [])
 
-        for n_data in nodes_data: self._create_node(n_data, offset)
+        for n_data in nodes_data: self._create_node(n_data)
+        for n_data in nodes_data: self._set_parent(n_data)
+        for n_data in nodes_data: self._configure_transform_and_props(n_data, offset)
         self._handle_zones(nodes_data)
-        for n_data in nodes_data: self._configure_node(n_data)
+        
         links = json_data.get("links", []) or json_data.get("root", {}).get("links", [])
         self._link_nodes(links)
-        LayoutEngine.apply(self.tree, self.created_nodes)
+        
+        if not self.has_valid_location and len(self.created_nodes) > 1:
+            LayoutEngine.apply(self.tree, self.created_nodes)
+            
+        if self.created_nodes:
+            self.tree.nodes.active = self.created_nodes[-1]
 
-    def _create_node(self, n_data, offset):
+    def _create_node(self, n_data):
         raw_type = n_data.get("type")
         name = n_data.get("name")
         final_type = node_mappings.resolve_node_id(raw_type)
@@ -221,7 +272,6 @@ class ConstructionEngine:
             except: pass
         
         if node is None:
-            # 手动模糊搜救 (Manual Fuzzy)
             if "Proximity" in raw_type and "Geometry" in raw_type:
                 try: node = self.tree.nodes.new("GeometryNodeProximity")
                 except: pass
@@ -231,16 +281,64 @@ class ConstructionEngine:
             node.label = f"MISSING: {raw_type}"
             node.use_custom_color = True; node.color = (1.0, 0.0, 0.0)
 
-        node.name = name; node.select = True
-        self.node_map[name] = node; self.created_nodes.append(node)
-        
+        node.name = name
+        node.select = True
+        self.node_map[name] = node
+        self.created_nodes.append(node)
+
+    def _set_parent(self, n_data):
+        if "parent" in n_data and n_data["parent"] in self.node_map:
+            node = self.node_map.get(n_data["name"])
+            if node: node.parent = self.node_map[n_data["parent"]]
+
+    def _configure_transform_and_props(self, n_data, offset):
+        node = self.node_map.get(n_data.get("name"))
+        if not node: return
+
+        # 1. 恢复位置
         params = n_data.get("params", {})
-        loc = n_data.get("location_absolute", n_data.get("location", params.get("location")))
-        if loc and isinstance(loc, list) and len(loc) == 2:
-            node.location = (loc[0] + offset[0], loc[1] + offset[1])
+        raw_loc = n_data.get("location_absolute", n_data.get("location", params.get("location")))
+        
+        if raw_loc and isinstance(raw_loc, list) and len(raw_loc) == 2:
+            self.has_valid_location = True
+            node.location = (raw_loc[0] + offset[0], raw_loc[1] + offset[1])
+            
         if node.bl_idname == 'NodeFrame':
-            node.width = n_data.get("width", 100); node.height = n_data.get("height", 100)
+            node.width = n_data.get("width", 100)
+            node.height = n_data.get("height", 100)
             if "label" in params: node.label = params["label"]
+
+        # 2. 设置参数
+        for k, v in params.items():
+            if k in {"location", "width", "height"}: continue
+            if isinstance(v, dict) and "__type__" in v:
+                if v["__type__"] == "ColorRamp": SpecialHandlers.build_color_ramp(getattr(node, k, None), v["data"])
+                continue
+            node_mappings.universal_set_property(node, k, v)
+
+        # 3. 设置端口默认值
+        inputs_data = n_data.get("inputs", {})
+        sock_map = {s.name: s for s in node.inputs}
+        for s in node.inputs: 
+            if hasattr(s, "identifier"): sock_map[s.identifier] = s
+            
+        for k, v in inputs_data.items():
+            if k in sock_map:
+                s = sock_map[k]
+                try:
+                    if s.type == 'OBJECT' and isinstance(v, str): s.default_value = bpy.data.objects.get(v)
+                    elif s.type == 'MATERIAL' and isinstance(v, str): s.default_value = bpy.data.materials.get(v)
+                    elif s.type == 'IMAGE' and isinstance(v, str): s.default_value = bpy.data.images.get(v)
+                    else: s.default_value = v
+                except: pass
+        
+        # 4. 恢复 Socket 属性 (hide/hide_value)
+        socket_props = n_data.get("socket_props", {})
+        for k, props in socket_props.items():
+            if k in sock_map:
+                s = sock_map[k]
+                if "hide" in props: s.hide = props["hide"]
+                if "hide_value" in props: s.hide_value = props["hide_value"]
 
     def _handle_zones(self, nodes_data):
         for in_type, out_type in SpecialHandlers.ZONE_PAIRS:
@@ -256,39 +354,6 @@ class ConstructionEngine:
                     out_type = node.bl_idname.replace("Input", "Output")
                     outputs = [n for n in self.node_map.values() if n.bl_idname == out_type]
                     if outputs: SpecialHandlers.rebuild_zone_interface(outputs[0], n_data["zone_interface"])
-
-    def _configure_node(self, n_data):
-        node = self.node_map.get(n_data.get("name"))
-        if not node: return
-
-        # A. 属性 (Params)
-        for k, v in n_data.get("params", {}).items():
-            if k in {"location", "width", "height"}: continue
-            if isinstance(v, dict) and "__type__" in v:
-                if v["__type__"] == "ColorRamp": SpecialHandlers.build_color_ramp(getattr(node, k, None), v["data"])
-                continue
-            
-            # [Fix: Z_UP] 强制写入策略在这里生效
-            node_mappings.universal_set_property(node, k, v)
-
-        # B. 端口 (Inputs)
-        inputs_data = n_data.get("inputs", {})
-        sock_map = {s.name: s for s in node.inputs}
-        for s in node.inputs: 
-            if hasattr(s, "identifier"): sock_map[s.identifier] = s
-            
-        for k, v in inputs_data.items():
-            if k in sock_map:
-                s = sock_map[k]
-                try:
-                    if s.type == 'OBJECT' and isinstance(v, str): s.default_value = bpy.data.objects.get(v)
-                    elif s.type == 'MATERIAL' and isinstance(v, str): s.default_value = bpy.data.materials.get(v)
-                    elif s.type == 'IMAGE' and isinstance(v, str): s.default_value = bpy.data.images.get(v)
-                    else: s.default_value = v
-                except: pass
-
-        if "parent" in n_data and n_data["parent"] in self.node_map:
-            node.parent = self.node_map[n_data["parent"]]
 
     def _link_nodes(self, links_data):
         for l in links_data:
@@ -322,7 +387,6 @@ class LayoutEngine:
             if link.from_node.name in node_map and link.to_node.name in node_map:
                 children[link.from_node.name].append(link.to_node.name)
                 parents[link.to_node.name].append(link.from_node.name)
-        
         levels = {n.name: 0 for n in new_nodes}
         queue = [name for name, p in parents.items() if not p] or [new_nodes[0].name]
         visited = set(queue)
@@ -332,12 +396,10 @@ class LayoutEngine:
                 if levels[child] < levels[curr] + 1:
                     levels[child] = levels[curr] + 1
                     if child not in visited: visited.add(child); queue.append(child)
-        
         level_groups = {}
         for name, lvl in levels.items():
             if lvl not in level_groups: level_groups[lvl] = []
             level_groups[lvl].append(name)
-            
         X_STEP, Y_STEP = 300, -220
         for lvl in sorted(level_groups.keys()):
             group = level_groups[lvl]
@@ -380,6 +442,13 @@ class GN_OT_Build(bpy.types.Operator):
             data = DataUtils.robust_json_load(context.window_manager.clipboard)
             if not data: 
                 self.report({'ERROR'}, "剪贴板无效"); return {'CANCELLED'}
+            
+            if "root" in data and "nodes" not in data: data = data["root"]
+
+            # [UX Fix] 追加模式下取消现有选中
+            if self.mode == 'APPEND':
+                for n in tree.nodes: n.select = False
+
             engine = ConstructionEngine(tree)
             offset = (200, -200) if self.mode == 'APPEND' else (0,0)
             engine.build(data, clear=(self.mode == 'REPLACE'), offset=offset)
@@ -389,7 +458,7 @@ class GN_OT_Build(bpy.types.Operator):
         return {'FINISHED'}
 
 class GN_PT_Panel(bpy.types.Panel):
-    bl_label = "GeoNeural 节点助手 v5.1.0"
+    bl_label = "GeoNeural 节点助手 v5.4.0"
     bl_idname = "GN_PT_main"
     bl_space_type = 'NODE_EDITOR' 
     bl_region_type = 'UI'
