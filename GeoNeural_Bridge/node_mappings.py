@@ -1,145 +1,209 @@
 import bpy
 import json
 import os
+import difflib
 
 # ==============================================================================
-# 配置：数据库标准命名
+# 配置
 # ==============================================================================
 DB_FILENAME = "blender_node_schema.json"
 
 # ==============================================================================
-# 全局缓存 (运行时加载，避免重复IO)
+# 数据库服务 (Database Service)
 # ==============================================================================
-_DB_NODES = {}      # 节点详细信息库
-_DB_ALIASES = {}    # 别名反向查找表 (UI名/旧名 -> 真实ID)
-_DB_META = {}       # 元数据 (包含 socket_map 等)
-
-def load_db():
-    """
-    加载标准数据库文件。
-    该文件应由 extract_blender_nodes.py 生成并放入插件目录。
-    """
-    global _DB_NODES, _DB_ALIASES, _DB_META
+class NodeSchemaDatabase:
+    _instance = None
     
-    # 如果已加载，直接返回 True
-    if _DB_NODES:
-        return True
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super(NodeSchemaDatabase, cls).__new__(cls)
+            cls._instance._reset()
+        return cls._instance
 
-    # 获取当前脚本所在目录的 JSON 路径
-    json_path = os.path.join(os.path.dirname(__file__), DB_FILENAME)
+    def _reset(self):
+        self.nodes = {}
+        self.aliases = {}
+        self.meta = {}
+        self.loaded = False
+
+    def load(self):
+        if self.loaded: return True
+        
+        json_path = os.path.join(os.path.dirname(__file__), DB_FILENAME)
+        if not os.path.exists(json_path):
+            # print(f"[GeoNeural] ⚠️ 数据库未找到: {DB_FILENAME}")
+            return False
+
+        try:
+            with open(json_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                self.nodes = data.get("nodes", {})
+                self.aliases = data.get("alias_map", {})
+                self.meta = data.get("meta", {})
+                self.loaded = True
+                return True
+        except Exception as e:
+            print(f"[GeoNeural] ❌ 数据库损坏: {e}")
+            return False
+
+    def get_alias(self, name):
+        self.load()
+        return self.aliases.get(name)
+
+    def get_node_info(self, bl_idname):
+        self.load()
+        return self.nodes.get(bl_idname, {})
+
+    def get_socket_map(self):
+        self.load()
+        return self.meta.get("socket_map", {})
+
+db = NodeSchemaDatabase()
+
+# ==============================================================================
+# 节点解析服务 (Resolver Service)
+# ==============================================================================
+class NodeResolver:
+    _dynamic_cache = {}
+
+    @classmethod
+    def _ensure_dynamic_cache(cls):
+        if cls._dynamic_cache: return
+        for node_cls in bpy.types.Node.__subclasses__():
+            if hasattr(node_cls, "bl_idname"):
+                bid = node_cls.bl_idname
+                cls._dynamic_cache[bid] = bid
+                # 注册简写 (GeometryNodeMath -> Math)
+                short = bid.replace("GeometryNode", "").replace("ShaderNode", "").replace("FunctionNode", "").replace("CompositorNode", "")
+                cls._dynamic_cache[short] = bid
+                cls._dynamic_cache[short.upper()] = bid
+
+    @classmethod
+    def resolve_id(cls, raw_name):
+        if not raw_name: return None
+        
+        # 1. 数据库查找
+        db_match = db.get_alias(raw_name)
+        if db_match: return db_match
+        
+        clean_name = raw_name.replace(" ", "").replace("_", "")
+        db_match_clean = db.get_alias(clean_name)
+        if db_match_clean: return db_match_clean
+        
+        # 2. 动态反射查找
+        cls._ensure_dynamic_cache()
+        if raw_name in cls._dynamic_cache: return cls._dynamic_cache[raw_name]
+        
+        # 3. 模糊搜救
+        matches = difflib.get_close_matches(clean_name, cls._dynamic_cache.keys(), n=1, cutoff=0.6)
+        if matches:
+            found = cls._dynamic_cache[matches[0]]
+            print(f"[GeoNeural] 🔧 自动纠错: {raw_name} -> {found}")
+            return found
+            
+        return raw_name
+
+# ==============================================================================
+# 属性适配服务 (Property Adapter Service)
+# ==============================================================================
+class PropertyAdapter:
     
-    if not os.path.exists(json_path):
-        print(f"[GeoNeural] 严重错误: 找不到数据库文件 '{DB_FILENAME}'")
-        print(f"[GeoNeural] 请运行提取脚本并将生成的 JSON 放入插件目录。")
-        return False
+    @staticmethod
+    def _safe_vector(value, size=3):
+        if not hasattr(value, "__len__") or isinstance(value, str):
+            try: return [float(value)] * size
+            except: return None
+        val_list = list(value)
+        if len(val_list) >= size: return val_list[:size]
+        return val_list + [0.0] * (size - len(val_list))
 
-    try:
-        with open(json_path, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-            
-            # 1. 加载节点数据
-            _DB_NODES = data.get("nodes", {})
-            
-            # 2. 加载别名映射 (UI Name -> bl_idname)
-            _DB_ALIASES = data.get("alias_map", {})
-            
-            # 3. 加载元数据 (包含 Socket 类型映射表)
-            _DB_META = data.get("meta", {})
-            
-            print(f"[GeoNeural] 数据库已加载: {_DB_META.get('version', '未知版本')}")
-            print(f"   - 节点数量: {len(_DB_NODES)}")
-            print(f"   - 索引条目: {len(_DB_ALIASES)}")
+    @classmethod
+    def set_property(cls, node, prop_name, value):
+        """
+        全能属性设置器：包含强制写入策略，修复 Enum 失效问题。
+        """
+        if not hasattr(node, prop_name): return False
+        
+        # 1. 获取类型信息 (优先 DB，次选反射)
+        schema = db.get_node_info(node.bl_idname).get("properties", {}).get(prop_name, {})
+        prop_type = schema.get("type")
+        enum_opts = schema.get("options", [])
+
+        if not prop_type:
+            try:
+                rna = node.bl_rna.properties.get(prop_name)
+                if rna:
+                    prop_type = rna.type
+                    if rna.type == 'ENUM':
+                        enum_opts = [i.identifier for i in rna.enum_items]
+            except: pass
+
+        # 2. 执行赋值
+        try:
+            # === 策略 A: 枚举智能匹配 ===
+            if prop_type == 'ENUM':
+                # (1) 精确匹配
+                if value in enum_opts:
+                    setattr(node, prop_name, value)
+                    return True
+                
+                # (2) 归一化匹配 (Add -> ADD, Z_up -> Z_UP)
+                norm_val = str(value).upper().replace(" ", "_")
+                if norm_val in enum_opts:
+                    setattr(node, prop_name, norm_val)
+                    return True
+                    
+                # (3) 模糊匹配
+                if enum_opts:
+                    matches = difflib.get_close_matches(norm_val, enum_opts, n=1, cutoff=0.6)
+                    if matches:
+                        setattr(node, prop_name, matches[0])
+                        return True
+                
+                # [关键修复] 如果上面都失败了，不要放弃！
+                # 很多时候 value 本身就是对的，只是 enum_opts 列表获取不全
+                # 继续向下执行到 "策略 F: 强制盲写"
+
+            # === 策略 B: 指针引用 ===
+            elif prop_type == 'POINTER' and isinstance(value, str):
+                if value in bpy.data.objects: setattr(node, prop_name, bpy.data.objects[value]); return True
+                if value in bpy.data.materials: setattr(node, prop_name, bpy.data.materials[value]); return True
+                if value in bpy.data.images: setattr(node, prop_name, bpy.data.images[value]); return True
+                if value in bpy.data.collections: setattr(node, prop_name, bpy.data.collections[value]); return True
+
+            # === 策略 C: 基础类型 ===
+            elif prop_type == 'BOOLEAN':
+                bval = str(value).lower() in ("true", "yes", "on", "1")
+                setattr(node, prop_name, bval); return True
+
+            elif prop_type == 'FLOAT':
+                setattr(node, prop_name, float(value)); return True
+                
+            elif prop_type == 'INT':
+                setattr(node, prop_name, int(float(value))); return True
+
+            elif prop_type in ('FLOAT_VECTOR', 'FLOAT_COLOR', 'BOOLEAN_VECTOR', 'INT_VECTOR'):
+                size = 4 if 'COLOR' in str(prop_type) else 3
+                vec = cls._safe_vector(value, size)
+                if vec: setattr(node, prop_name, vec); return True
+
+            # === 策略 F: 强制盲写 (Blind Force) ===
+            # 如果上面所有特定类型的尝试都失败（或被跳过），执行此行。
+            # 这解决了 "Z_UP" 正确但不在 enum_opts 列表里的情况。
+            setattr(node, prop_name, value)
             return True
-            
-    except Exception as e:
-        print(f"[GeoNeural] JSON 解析错误: {e}")
-        return False
 
-def resolve_node_id(name):
-    """
-    核心功能：将任意名称（UI名、旧枚举名、简化名）解析为真实的 bl_idname。
-    完全依赖数据库中的 alias_map。
-    """
-    # 确保数据库已加载
-    if not _DB_ALIASES: 
-        if not load_db(): return name # 加载失败则原样返回
-    
-    # 1. 精确匹配 (最快)
-    if name in _DB_ALIASES:
-        return _DB_ALIASES[name]
-    
-    # 2. 容错匹配 (去空格，例如 "Join Geometry" -> "JoinGeometry")
-    if name:
-        no_space = name.replace(" ", "")
-        if no_space in _DB_ALIASES:
-            return _DB_ALIASES[no_space]
-        
-        # 3. 容错匹配 (全大写下划线，针对旧代码风格，如 "JOIN_GEOMETRY")
-        upper_snake = name.upper().replace(" ", "_")
-        if upper_snake in _DB_ALIASES:
-            return _DB_ALIASES[upper_snake]
-        
-    # 查不到则原样返回，交由 Blender 尝试处理
-    return name
+        except Exception as e:
+            # print(f"[GeoNeural] 设置属性失败 {prop_name}={value}: {e}")
+            return False
 
-def get_node_info(bl_idname):
-    """
-    获取节点的完整 Schema 信息 (包含 inputs, outputs, properties)。
-    """
-    if not _DB_NODES: load_db()
-    return _DB_NODES.get(bl_idname, {})
-
-def get_socket_type_map():
-    """
-    获取 C++ 类型到 Python 类型的映射表。
-    例如: "Vector" -> "NodeSocketVector"
-    """
-    if not _DB_META: load_db()
-    return _DB_META.get("socket_map", {})
-
-def get_zone_api_type(bl_socket_type):
-    """
-    [新增] 将 Python Socket 类型转换为 Repeat/Simulation Zone API 需要的枚举。
-    例如: "NodeSocketVector" -> "VECTOR"
-    """
-    # 移除前缀
-    raw = bl_socket_type.replace("NodeSocket", "").upper()
-    
-    # 特殊映射表 (Blender API 特异性)
-    MAPPING = {
-        "BOOL": "BOOLEAN",
-        "COLOR": "RGBA",       # Blender Zone API 中使用 RGBA 而非 COLOR
-        "INT": "INT",
-        "FLOAT": "FLOAT",
-        "VECTOR": "VECTOR",
-        "STRING": "STRING",
-        "OBJECT": "OBJECT",
-        "COLLECTION": "COLLECTION",
-        "IMAGE": "IMAGE",
-        "MATERIAL": "MATERIAL",
-        "GEOMETRY": "GEOMETRY",
-        "ROTATION": "ROTATION",
-        "MATRIX": "MATRIX"
-    }
-    return MAPPING.get(raw, "FLOAT") # 默认安全回退到 FLOAT
-
-def validate_enum(prop_name, value, prop_info):
-    """
-    校验枚举值是否合法。
-    数据库 V10 已经将全局枚举展开到了 prop_info['options'] 中。
-    """
-    options = prop_info.get("options", [])
-    
-    # 如果 Schema 中没有定义选项（空列表），则默认不做限制，返回 True
-    if not options: 
-        return True 
-    
-    # 1. 精确匹配
-    if value in options: 
-        return True
-    
-    # 2. 大写匹配 (解决 AI 输出小写 "z_up" 但 Blender 需要 "Z_UP" 的情况)
-    if isinstance(value, str) and value.upper() in options: 
-        return True
-    
-    return False
+# ==============================================================================
+# API 代理 (保持函数签名兼容性)
+# ==============================================================================
+def load_db(): return db.load()
+def resolve_node_id(name): return NodeResolver.resolve_id(name)
+def get_node_info(bid): return db.get_node_info(bid)
+def get_socket_type_map(): return db.get_socket_map()
+def universal_set_property(node, k, v, schema=None): return PropertyAdapter.set_property(node, k, v)
+def get_zone_api_type(t): 
+    return {"BOOL":"BOOLEAN","COLOR":"RGBA","INT":"INT","FLOAT":"FLOAT","VECTOR":"VECTOR"}.get(t.replace("NodeSocket","").upper(), "FLOAT")
