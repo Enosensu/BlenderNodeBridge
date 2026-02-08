@@ -1,10 +1,10 @@
 bl_info = {
-    "name": "GeoNeural Bridge (v5.9.0 Smart Input)",
+    "name": "GeoNeural Bridge (v5.9.2 Ghost Defense)",
     "author": "Dev_Nodes_V5",
-    "version": (5, 9, 0),
+    "version": (5, 9, 2),
     "blender": (4, 0, 0),
     "location": "Node Editor > Sidebar > GeoNeural",
-    "description": "基于 V9.0 核心，新增智能端口路由算法，自动修正 AI 的输入索引偏移。",
+    "description": "基于 V9.0 核心，修复 Math 节点数值错位问题（过滤禁用端口），实现智能数值归位。",
     "category": "Node",
 }
 
@@ -218,12 +218,14 @@ class ConstructionEngine:
         if "root" in json_data and isinstance(json_data["root"], dict):
             nodes_data = json_data["root"].get("nodes", [])
 
+        # 提前获取连线数据
+        links_data = json_data.get("links", []) or json_data.get("root", {}).get("links", [])
+
         for n_data in nodes_data: self._create_node(n_data)
         for n_data in nodes_data: self._set_parent(n_data)
-        for n_data in nodes_data: self._configure_transform_and_props(n_data, offset)
+        for n_data in nodes_data: self._configure_transform_and_props(n_data, offset, links_data)
         self._handle_zones(nodes_data)
-        links = json_data.get("links", []) or json_data.get("root", {}).get("links", [])
-        self._link_nodes(links)
+        self._link_nodes(links_data)
         
         if not self.has_valid_location and len(self.created_nodes) > 1:
             LayoutEngine.apply(self.tree, self.created_nodes)
@@ -260,17 +262,19 @@ class ConstructionEngine:
             node = self.node_map.get(n_data["name"])
             if node: node.parent = self.node_map[n_data["parent"]]
 
-    def _configure_transform_and_props(self, n_data, offset):
+    def _configure_transform_and_props(self, n_data, offset, links_data):
         node = self.node_map.get(n_data.get("name"))
         if not node: return
 
         params = n_data.get("params", {})
         raw_loc = n_data.get("location_absolute", n_data.get("location", params.get("location")))
         
+        # 1. 恢复位置
         if raw_loc and isinstance(raw_loc, list) and len(raw_loc) == 2:
             self.has_valid_location = True
             node.location = (raw_loc[0] + offset[0], raw_loc[1] + offset[1])
             
+        # 2. 组框视觉
         if node.bl_idname == 'NodeFrame':
             if "width" in n_data: node.width = n_data["width"]
             if "height" in n_data: node.height = n_data["height"]
@@ -282,6 +286,7 @@ class ConstructionEngine:
                 col = params["color"]
                 if len(col) >= 3: node.color = (col[0], col[1], col[2])
 
+        # 3. 设置属性
         for k, v in params.items():
             if k in {"location", "width", "height"}: continue
             if node.bl_idname == 'NodeFrame' and k in {'color', 'use_custom_color', 'label', 'label_size', 'shrink'}: continue
@@ -290,56 +295,73 @@ class ConstructionEngine:
                 continue
             node_mappings.universal_set_property(node, k, v)
 
-        # [V5.9.0 核心修复] 智能端口路由算法
+        # 4. 智能填空 (Ghost Socket Fixed)
         inputs_data = n_data.get("inputs", {})
         sock_map = {s.name: s for s in node.inputs}
-        # 同时记录 ID 映射，以防万一
         for s in node.inputs:
             if hasattr(s, "identifier"): sock_map[s.identifier] = s
             
-        assigned_sockets = set() # 记录已赋值的端口，防止重复覆盖
+        future_linked_sockets = set()
+        for link in links_data:
+            if link.get("dst") == n_data.get("name"):
+                s = self._find_socket(node.inputs, link.get("dst_id"), link.get("dst_sock"))
+                if s: future_linked_sockets.add(s.identifier)
+        
+        assigned_sockets = set() 
 
         for k, v in inputs_data.items():
             target_socket = None
             
-            # 策略 1: 精确匹配 (ID 或 Name)
+            # 策略 A: 精确匹配 (增加 enabled 校验)
             if k in sock_map:
-                target_socket = sock_map[k]
+                s = sock_map[k]
+                # [关键修复] 即使名字对了，如果端口被禁用（幽灵端口），也要视为未找到，
+                # 从而强制进入策略 B 去寻找替代者。
+                if getattr(s, "enabled", True):
+                    target_socket = s
             
-            # 策略 2: 智能偏移纠错 (解决 Value_002 -> Value_001 -> Value)
+            # 策略 B: 智能递减 (Value_002 -> Value_001)
             if not target_socket:
                 match = re.match(r"(.*)_(\d{3})$", k)
                 if match:
                     base_name, num_str = match.groups()
                     num = int(num_str)
-                    # 尝试递减后缀寻找最佳匹配
-                    # 例如 AI 说 Value_002, 我们依次找 Value_002 -> Value_001 -> Value
                     candidates = []
+                    # 生成候选: _002, _001, Base
                     for i in range(num, -1, -1):
                         cand_name = base_name if i == 0 else f"{base_name}_{i:03d}"
                         if cand_name in sock_map:
                             candidates.append(sock_map[cand_name])
                     
-                    # 在候选者中，优先选择【未连接】且【未赋值】的端口
+                    # 筛选候选：必须启用(enabled) + 未连线 + 未预定
                     for cand in candidates:
-                        if not cand.is_linked and cand.identifier not in assigned_sockets:
+                        is_disabled = not getattr(cand, "enabled", True)
+                        is_future_linked = cand.identifier in future_linked_sockets
+                        is_already_linked = cand.is_linked
+                        is_assigned = cand.identifier in assigned_sockets
+                        
+                        if not is_disabled and not is_future_linked and not is_already_linked and not is_assigned:
                             target_socket = cand
                             break
-                    # 如果都连了线，退而求其次，选第一个存在的
+                    
+                    # 兜底：如果都找不到，找第一个启用的
                     if not target_socket and candidates:
-                        target_socket = candidates[0]
+                        for cand in candidates:
+                            if getattr(cand, "enabled", True):
+                                target_socket = cand
+                                break
 
-            # 执行赋值
             if target_socket:
                 try:
-                    assigned_sockets.add(target_socket.identifier) # 标记为已占用
-                    if not target_socket.is_linked: # 只有未连接时才设置值，避免破坏逻辑
+                    assigned_sockets.add(target_socket.identifier)
+                    if target_socket.identifier not in future_linked_sockets:
                         if target_socket.type == 'OBJECT' and isinstance(v, str): target_socket.default_value = bpy.data.objects.get(v)
                         elif target_socket.type == 'MATERIAL' and isinstance(v, str): target_socket.default_value = bpy.data.materials.get(v)
                         elif target_socket.type == 'IMAGE' and isinstance(v, str): target_socket.default_value = bpy.data.images.get(v)
                         else: target_socket.default_value = v
                 except: pass
         
+        # 5. 恢复端口属性
         socket_props = n_data.get("socket_props", {})
         for k, props in socket_props.items():
             if k in sock_map:
@@ -467,7 +489,7 @@ class GN_OT_Build(bpy.types.Operator):
         return {'FINISHED'}
 
 class GN_PT_Panel(bpy.types.Panel):
-    bl_label = "GeoNeural 节点助手 v5.9.0"
+    bl_label = "GeoNeural 节点助手 v5.9.2"
     bl_idname = "GN_PT_main"
     bl_space_type = 'NODE_EDITOR' 
     bl_region_type = 'UI'
