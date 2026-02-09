@@ -1,10 +1,10 @@
 bl_info = {
-    "name": "GeoNeural Bridge (v5.10.0 Visual Standard)",
+    "name": "GeoNeural Bridge (v5.12.0 Universal Visual Protocol)",
     "author": "Dev_Nodes_V5",
-    "version": (5, 10, 0),
+    "version": (5, 12, 0),
     "blender": (4, 0, 0),
     "location": "Node Editor > Sidebar > GeoNeural",
-    "description": "基于 v5.8.0 架构，强制统一数值接口命名逻辑（Value_001=第一行，Value_002=第二行）。",
+    "description": "基于 V9.0 核心，实施通用视觉索引协议（Input_001=第一行），统一所有接口命名。",
     "category": "Node",
 }
 
@@ -117,6 +117,12 @@ class SpecialHandlers:
             except: pass
         if output_node.id_data: output_node.id_data.update_tag()
 
+    @staticmethod
+    def get_base_name(name):
+        """提取接口基名 (去除 .001, _001 等后缀)"""
+        # 移除末尾的 .xxx 或 _xxx 数字
+        return re.sub(r"[._]\d+$", "", name)
+
 # ==============================================================================
 # 3. 序列化引擎 (Serialization Engine)
 # ==============================================================================
@@ -127,9 +133,36 @@ class SerializationEngine:
         self.selected_only = selected_only
         self.compact = compact
         self.nodes_to_process = [n for n in tree.nodes if n.select] if selected_only else list(tree.nodes)
+        # 全局映射表: node.name -> {socket_identifier: visual_name}
+        self.node_socket_maps = {} 
 
     def execute(self):
+        # 第一步：预计算所有节点的视觉接口名
+        self._precalculate_visual_names(self.tree)
         return self._serialize_recursive(self.tree)
+
+    def _precalculate_visual_names(self, current_tree):
+        # 递归处理子树前，先处理当前层级
+        for node in current_tree.nodes:
+            self.node_socket_maps[node.name] = {"inputs": {}, "outputs": {}}
+            
+            # 处理输入
+            visible_inputs = [s for s in node.inputs if getattr(s, "enabled", True) and not s.hide]
+            base_counters = {}
+            for s in visible_inputs:
+                base = SpecialHandlers.get_base_name(s.name)
+                base_counters[base] = base_counters.get(base, 0) + 1
+                visual_name = f"{base}_{base_counters[base]:03d}"
+                self.node_socket_maps[node.name]["inputs"][s.identifier] = visual_name
+                
+            # 处理输出
+            visible_outputs = [s for s in node.outputs if getattr(s, "enabled", True) and not s.hide]
+            base_counters_out = {}
+            for s in visible_outputs:
+                base = SpecialHandlers.get_base_name(s.name)
+                base_counters_out[base] = base_counters_out.get(base, 0) + 1
+                visual_name = f"{base}_{base_counters_out[base]:03d}"
+                self.node_socket_maps[node.name]["outputs"][s.identifier] = visual_name
 
     def _serialize_recursive(self, current_tree):
         nodes = self.nodes_to_process if current_tree == self.tree else list(current_tree.nodes)
@@ -141,12 +174,21 @@ class SerializationEngine:
             data["nodes"].append(node_data)
             if hasattr(node, "node_tree") and node.node_tree:
                 node_data["node_tree_name"] = node.node_tree.name
+                # 递归预计算子树 (如果有深层结构)
+                # 注意：简单起见，这里假设 node_socket_maps 已经包含所有唯一名称的节点
 
         for link in current_tree.links:
             if link.from_node.name in valid_names and link.to_node.name in valid_names:
+                # [V5.12.0] 连线使用视觉名称
+                src_map = self.node_socket_maps.get(link.from_node.name, {}).get("outputs", {})
+                dst_map = self.node_socket_maps.get(link.to_node.name, {}).get("inputs", {})
+                
+                src_sock_name = src_map.get(link.from_socket.identifier, link.from_socket.name)
+                dst_sock_name = dst_map.get(link.to_socket.identifier, link.to_socket.name)
+
                 data["links"].append({
-                    "src": link.from_node.name, "src_sock": link.from_socket.name, "src_id": link.from_socket.identifier,
-                    "dst": link.to_node.name, "dst_sock": link.to_socket.name, "dst_id": link.to_socket.identifier
+                    "src": link.from_node.name, "src_sock": src_sock_name, "src_id": link.from_socket.identifier,
+                    "dst": link.to_node.name, "dst_sock": dst_sock_name, "dst_id": link.to_socket.identifier
                 })
         return data
 
@@ -154,7 +196,7 @@ class SerializationEngine:
         d = {"name": node.name, "type": node.bl_idname, "params": {}, "inputs": {}}
         ALWAYS_EXCLUDE = {'rna_type', 'node_tree', 'inputs', 'outputs', 'interface', 'dimensions', 'is_active_output'}
         
-        # 紧凑模式黑名单: 剔除视觉/UI属性
+        # 紧凑模式黑名单
         COMPACT_EXCLUDE = {
             'name', 'location', 'width', 'height', 'select', 'location_absolute', 
             'warning_propagation', 'color_tag', 'width_hidden', 'internal_links', 
@@ -163,7 +205,6 @@ class SerializationEngine:
 
         for prop in node.bl_rna.properties.keys():
             if prop in ALWAYS_EXCLUDE: continue
-            
             if self.compact:
                 if prop in COMPACT_EXCLUDE: continue
                 if prop.startswith(('bl_', 'show_', '_')): continue
@@ -181,11 +222,15 @@ class SerializationEngine:
             d["is_zone"] = True
             d["zone_interface"] = [{"name": o.name, "socket_type": o.bl_idname} for o in node.outputs if o.bl_idname != "NodeSocketVirtual" and o.name not in SpecialHandlers.BUILTIN_SOCKETS]
 
+        # [V5.12.0] 使用预计算的视觉名称导出 Inputs
+        input_map = self.node_socket_maps.get(node.name, {}).get("inputs", {})
+
         for inp in node.inputs:
             if not inp.is_linked and hasattr(inp, "default_value"):
                 val = DataUtils.clean_data(inp.default_value)
                 if val is not None:
-                    key = inp.identifier if hasattr(inp, "identifier") else inp.name
+                    # 优先使用视觉名称 (Value_001, Value_002...)
+                    key = input_map.get(inp.identifier, inp.name)
                     d["inputs"][key] = val
         
         if not self.compact:
@@ -195,13 +240,12 @@ class SerializationEngine:
                 if s.hide: s_props["hide"] = True
                 if s.hide_value: s_props["hide_value"] = True
                 if s_props:
-                    key = s.identifier if hasattr(s, "identifier") else s.name
+                    # 属性键名也同步使用视觉名称
+                    key = input_map.get(s.identifier, s.name)
                     d["socket_props"][key] = s_props
             
             d["location"] = [int(node.location.x), int(node.location.y)]
-            # 确保 NodeFrame 的视觉尺寸被导出
-            if node.bl_idname == 'NodeFrame': 
-                d["width"], d["height"] = node.width, node.height
+            if node.bl_idname == 'NodeFrame': d["width"], d["height"] = node.width, node.height
                 
         if node.parent: d["parent"] = node.parent.name
         return d
@@ -223,12 +267,14 @@ class ConstructionEngine:
         if "root" in json_data and isinstance(json_data["root"], dict):
             nodes_data = json_data["root"].get("nodes", [])
 
+        # 提前获取连线数据
+        links_data = json_data.get("links", []) or json_data.get("root", {}).get("links", [])
+
         for n_data in nodes_data: self._create_node(n_data)
         for n_data in nodes_data: self._set_parent(n_data)
         for n_data in nodes_data: self._configure_transform_and_props(n_data, offset)
         self._handle_zones(nodes_data)
-        links = json_data.get("links", []) or json_data.get("root", {}).get("links", [])
-        self._link_nodes(links)
+        self._link_nodes(links_data)
         
         if not self.has_valid_location and len(self.created_nodes) > 1:
             LayoutEngine.apply(self.tree, self.created_nodes)
@@ -266,45 +312,52 @@ class ConstructionEngine:
             node = self.node_map.get(n_data["name"])
             if node: node.parent = self.node_map[n_data["parent"]]
 
-    def _get_visual_socket(self, collection, name):
-        """
-        [V5.10.0] 视觉索引核心：解析 Value_XXX 并按视觉顺序返回端口。
-        """
-        # 1. 正则匹配 Value_001, Value_002, Value_1, Value_2...
-        # 允许中间有任意个0，不区分大小写
-        match = re.match(r"^Value_?0*(\d+)$", name, re.IGNORECASE)
-        
-        if match:
-            # AI 逻辑：Value_001 是第 1 个
-            idx_1_based = int(match.group(1))
-            idx_0_based = max(0, idx_1_based - 1)
-            
-            # 2. 获取所有“视觉上存在”的端口 (启用 + 未隐藏)
-            # 这就是用户在界面上看到的顺序
-            visible_sockets = [s for s in collection if getattr(s, "enabled", True) and not s.hide]
-            
-            # 3. 按视觉索引返回
-            if 0 <= idx_0_based < len(visible_sockets):
-                return visible_sockets[idx_0_based]
-        
-        return None
-
     def _resolve_socket(self, collection, identifier, name):
         """
-        统一端口解析：优先视觉协议，其次常规匹配
+        [V5.12.0] 通用视觉索引解析
+        将 Name_00X 解析为: 基名 Name 的第 X 个可见端口
         """
-        # [策略 A] 视觉索引协议 (Visual Index Protocol)
-        if name and name.lower().startswith("value"):
-            target = self._get_visual_socket(collection, name)
-            if target: return target
+        if not name: return None
 
-        # [策略 B] 常规匹配 (Name 优先)
-        if name and name in collection:
-            return collection[name]
+        # 1. 尝试解析 "BaseName_00X" 格式
+        # 匹配末尾的 _数字 (支持 _1, _01, _001)
+        match = re.match(r"^(.*?)(?:_?(\d+))?$", name)
+        
+        target_base = name # 默认完全匹配
+        target_idx_0 = 0   # 默认第1个
+        
+        if match:
+            base_str, num_str = match.groups()
+            if num_str:
+                target_base = base_str if base_str else "Value" # 处理 "_001" 这种情况
+                target_idx_0 = int(num_str) - 1 # 转为 0-based
+            else:
+                target_base = name
+                target_idx_0 = 0 # 没有后缀默认为第1个
+
+        # 2. 遍历集合中所有“可见且启用”的端口，寻找匹配
+        # 维护一个计数器
+        match_count = 0
+        visible_sockets = [s for s in collection if getattr(s, "enabled", True) and not s.hide]
+        
+        for s in visible_sockets:
+            # 获取当前端口的基名
+            s_base = SpecialHandlers.get_base_name(s.name)
             
-        # [策略 C] ID 匹配
+            # 如果基名匹配 (不区分大小写)
+            if s_base.lower() == target_base.lower():
+                if match_count == target_idx_0:
+                    return s
+                match_count += 1
+                
+        # [兜底策略] 如果视觉索引失败，尝试直接 Name 匹配 (兼容旧版 JSON)
+        for s in collection:
+            if s.name == name and getattr(s, "enabled", True):
+                return s
+        
+        # [ID 匹配] 最后尝试 ID
         if identifier:
-            for s in collection: 
+            for s in collection:
                 if s.identifier == identifier: return s
                 
         return None
@@ -316,10 +369,12 @@ class ConstructionEngine:
         params = n_data.get("params", {})
         raw_loc = n_data.get("location_absolute", n_data.get("location", params.get("location")))
         
+        # 1. 恢复位置
         if raw_loc and isinstance(raw_loc, list) and len(raw_loc) == 2:
             self.has_valid_location = True
             node.location = (raw_loc[0] + offset[0], raw_loc[1] + offset[1])
             
+        # 2. 组框视觉
         if node.bl_idname == 'NodeFrame':
             if "width" in n_data: node.width = n_data["width"]
             if "height" in n_data: node.height = n_data["height"]
@@ -331,6 +386,7 @@ class ConstructionEngine:
                 col = params["color"]
                 if len(col) >= 3: node.color = (col[0], col[1], col[2])
 
+        # 3. 设置属性
         for k, v in params.items():
             if k in {"location", "width", "height"}: continue
             if node.bl_idname == 'NodeFrame' and k in {'color', 'use_custom_color', 'label', 'label_size', 'shrink'}: continue
@@ -339,18 +395,10 @@ class ConstructionEngine:
                 continue
             node_mappings.universal_set_property(node, k, v)
 
-        # 3. 设置端口默认值 (应用视觉索引)
+        # 4. 设置端口默认值 (通用视觉索引)
         inputs_data = n_data.get("inputs", {})
-        
-        # 为了兼容性，先构建常规映射
-        sock_map = {s.name: s for s in node.inputs}
-        for s in node.inputs:
-            if hasattr(s, "identifier"): sock_map[s.identifier] = s
-            
         for k, v in inputs_data.items():
-            # 使用统一解析逻辑，优先解析 Value_XXX
             target_socket = self._resolve_socket(node.inputs, None, k)
-            
             if target_socket:
                 try:
                     if target_socket.type == 'OBJECT' and isinstance(v, str): target_socket.default_value = bpy.data.objects.get(v)
@@ -359,10 +407,9 @@ class ConstructionEngine:
                     else: target_socket.default_value = v
                 except: pass
         
-        # 4. 恢复 Socket 属性
+        # 5. 恢复 Socket 属性
         socket_props = n_data.get("socket_props", {})
         for k, props in socket_props.items():
-            # 使用统一解析逻辑查找端口
             s = self._resolve_socket(node.inputs, None, k)
             if s:
                 if "hide" in props: s.hide = props["hide"]
@@ -388,7 +435,7 @@ class ConstructionEngine:
             src, dst = self.node_map.get(l.get("src")), self.node_map.get(l.get("dst"))
             if src and dst:
                 try:
-                    # 使用统一解析逻辑，确保连线目标与赋值目标一致
+                    # 使用统一视觉解析，确保连线准确
                     src_sock = self._resolve_socket(src.outputs, l.get("src_id"), l.get("src_sock"))
                     dst_sock = self._resolve_socket(dst.inputs, l.get("dst_id"), l.get("dst_sock"))
                     if src_sock and dst_sock: self.tree.links.new(src_sock, dst_sock)
@@ -479,7 +526,7 @@ class GN_OT_Build(bpy.types.Operator):
         return {'FINISHED'}
 
 class GN_PT_Panel(bpy.types.Panel):
-    bl_label = "GeoNeural 节点助手 v5.10.0"
+    bl_label = "GeoNeural 节点助手 v5.12.0"
     bl_idname = "GN_PT_main"
     bl_space_type = 'NODE_EDITOR' 
     bl_region_type = 'UI'
