@@ -2,23 +2,36 @@ import bpy
 import difflib
 
 # ==============================================================================
-# 配置：V9.0 Final Core (存档点)
+# GeoNeural Core: Static Reflection & Mappings
+# Version: v5.13.19 (Stable Data Layer)
 # ==============================================================================
-# 纯内存反射架构，无文件依赖，无数据库文件。
-# 实现了 ID 解析、属性适配、类型推导的实时化。
 
-# ==============================================================================
-# 1. 静态反射缓存
-# ==============================================================================
 _CLASS_ID_CACHE = {}
 _SOCKET_TYPE_MAP = {}
 _CACHE_BUILT = False
+
+# [THE ROSETTA STONE] 捕捉属性类型翻译表
+# 修正依据：Blender API 报错提示 ('FLOAT', 'INT', 'BOOLEAN', 'VECTOR', 'RGBA'...)
+_CAPTURE_TYPE_MAP = {
+    'FLOAT': 'FLOAT',       # 修正：API 要求必须是 FLOAT
+    'INT': 'INT',
+    'FLOAT_VECTOR': 'VECTOR', 
+    'FLOAT_COLOR': 'RGBA', 
+    'BOOLEAN': 'BOOLEAN', 
+    'ROTATION': 'ROTATION',
+    'MATRIX': 'MATRIX',
+    'STRING': 'STRING',
+    
+    # 兼容性冗余映射
+    'VALUE': 'FLOAT',
+    'VECTOR': 'VECTOR',
+    'RGBA': 'RGBA'
+}
 
 def _build_memory_cache():
     global _CACHE_BUILT, _CLASS_ID_CACHE, _SOCKET_TYPE_MAP
     if _CACHE_BUILT: return
 
-    # A. 建立节点 ID 索引
     for cls in bpy.types.Node.__subclasses__():
         if hasattr(cls, "bl_idname"):
             bid = cls.bl_idname
@@ -30,117 +43,88 @@ def _build_memory_cache():
                 _CLASS_ID_CACHE[cls.bl_label] = bid
                 _CLASS_ID_CACHE[cls.bl_label.upper()] = bid
 
-    # B. Socket 类型映射 (递归全量)
-    def get_subs(cls):
-        return set(cls.__subclasses__()).union([s for c in cls.__subclasses__() for s in get_subs(c)])
-    
-    for cls in get_subs(bpy.types.NodeSocket):
-        bid = getattr(cls, "bl_idname", None)
-        if not bid: continue
-        api = bid.replace("NodeSocket", "").upper()
-        if api == "BOOL": api = "BOOLEAN"
-        if api == "COLOR": api = "RGBA"
-        _SOCKET_TYPE_MAP[bid] = api
-
-    # 兜底补充
-    _SOCKET_TYPE_MAP["NodeSocketGeometry"] = "GEOMETRY"
-    _SOCKET_TYPE_MAP["NodeSocketShader"] = "SHADER"
-    _SOCKET_TYPE_MAP["NodeSocketVirtual"] = "FLOAT" 
-    
+    _SOCKET_TYPE_MAP = {
+        'VALUE': 'NodeSocketFloat', 'INT': 'NodeSocketInt', 
+        'VECTOR': 'NodeSocketVector', 'RGBA': 'NodeSocketColor', 
+        'BOOLEAN': 'NodeSocketBool', 'ROTATION': 'NodeSocketRotation', 
+        'MATRIX': 'NodeSocketMatrix', 'GEOMETRY': 'NodeSocketGeometry',
+        'STRING': 'NodeSocketString', 'OBJECT': 'NodeSocketObject',
+        'COLLECTION': 'NodeSocketCollection', 'IMAGE': 'NodeSocketImage',
+        'MATERIAL': 'NodeSocketMaterial', 'TEXTURE': 'NodeSocketTexture'
+    }
     _CACHE_BUILT = True
 
-# ==============================================================================
-# 2. 核心服务：ID 解析
-# ==============================================================================
-def resolve_node_id(raw_name):
-    if not raw_name: return None
-    _build_memory_cache()
+def resolve_node_id(fuzzy_name):
+    if not _CACHE_BUILT: _build_memory_cache()
+    if not fuzzy_name: return "NodeFrame"
     
-    if raw_name in _CLASS_ID_CACHE: return _CLASS_ID_CACHE[raw_name]
+    if fuzzy_name in _CLASS_ID_CACHE: return _CLASS_ID_CACHE[fuzzy_name]
     
-    clean = raw_name.replace(" ", "").replace("_", "")
-    if clean in _CLASS_ID_CACHE: return _CLASS_ID_CACHE[clean]
+    norm = fuzzy_name.replace(" ", "").replace("_", "").upper()
+    if norm in _CLASS_ID_CACHE: return _CLASS_ID_CACHE[norm]
     
-    upper = clean.upper()
-    if upper in _CLASS_ID_CACHE: return _CLASS_ID_CACHE[upper]
-    
-    matches = difflib.get_close_matches(upper, _CLASS_ID_CACHE.keys(), n=1, cutoff=0.6)
+    matches = difflib.get_close_matches(fuzzy_name, list(_CLASS_ID_CACHE.keys()), n=1, cutoff=0.6)
     if matches: return _CLASS_ID_CACHE[matches[0]]
     
-    return raw_name
+    return fuzzy_name
 
-# ==============================================================================
-# 3. 核心服务：通用属性写入 (V9.0 强制策略)
-# ==============================================================================
-def universal_set_property(node, prop_name, value, schema_props=None):
-    if not hasattr(node, prop_name): return False
-    
-    # 实时反射获取属性定义
-    rna_prop = node.bl_rna.properties.get(prop_name)
-    if not rna_prop: 
-        try: setattr(node, prop_name, value); return True
-        except: return False
+def get_zone_api_type(socket_idname):
+    mapping = {
+        'NodeSocketFloat': 'FLOAT', 'NodeSocketInt': 'INT',
+        'NodeSocketVector': 'VECTOR', 'NodeSocketColor': 'RGBA',
+        'NodeSocketBool': 'BOOLEAN', 'NodeSocketRotation': 'ROTATION',
+        'NodeSocketMatrix': 'MATRIX', 'NodeSocketString': 'STRING',
+        'NodeSocketGeometry': 'GEOMETRY'
+    }
+    return mapping.get(socket_idname, 'FLOAT')
 
-    prop_type = rna_prop.type
-    
+def get_capture_socket_type(internal_data_type):
+    """将内部数据类型转换为 capture_items.new() 所需的类型参数"""
+    return _CAPTURE_TYPE_MAP.get(internal_data_type, 'FLOAT')
+
+def universal_set_property(node, prop_name, value):
+    """
+    [v5.13.6 Native Logic]
+    宽容模式的属性设置器，支持模糊匹配和强制写入。
+    这对 Math/Mix 等节点的枚举属性至关重要。
+    """
     try:
-        if prop_type == 'ENUM':
-            enum_items = [i.identifier for i in rna_prop.enum_items]
-            # 1. 精确
-            if value in enum_items: 
-                setattr(node, prop_name, value); return True
-            # 2. 归一化
-            norm_val = str(value).upper().replace(" ", "_")
-            if norm_val in enum_items: 
-                setattr(node, prop_name, norm_val); return True
-            # 3. 模糊
-            matches = difflib.get_close_matches(norm_val, enum_items, n=1, cutoff=0.6)
-            if matches: 
-                setattr(node, prop_name, matches[0]); return True
-            # 4. 强写
+        if not hasattr(node, prop_name): return False
+        
+        try: rna_prop = node.bl_rna.properties.get(prop_name)
+        except: setattr(node, prop_name, value); return True
+
+        if not rna_prop:
             setattr(node, prop_name, value); return True
 
+        prop_type = rna_prop.type
+        
+        if prop_type == 'ENUM':
+            if isinstance(value, str):
+                items = [i.identifier for i in rna_prop.enum_items]
+                val_upper = value.upper().replace(" ", "_")
+                if val_upper in items: setattr(node, prop_name, val_upper); return True
+                matches = difflib.get_close_matches(val_upper, items, n=1, cutoff=0.8)
+                if matches: setattr(node, prop_name, matches[0]); return True
+
         elif prop_type == 'BOOLEAN':
-            bval = str(value).lower() in ("true", "yes", "on", "1")
-            setattr(node, prop_name, bval); return True
+            setattr(node, prop_name, bool(value))
+            return True
 
-        elif prop_type in ('FLOAT', 'INT'):
-            val = float(value)
-            setattr(node, prop_name, val if prop_type == 'FLOAT' else int(val)); return True
-
-        elif prop_type in ('FLOAT_VECTOR', 'FLOAT_COLOR', 'BOOLEAN_VECTOR', 'INT_VECTOR'):
-            size = rna_prop.array_length
-            val_list = list(value) if hasattr(value, "__iter__") and not isinstance(value, str) else [float(value)]
-            if len(val_list) < size: val_list += [0.0] * (size - len(val_list))
-            setattr(node, prop_name, val_list[:size]); return True
-
-        elif prop_type == 'POINTER' and isinstance(value, str):
-            target_type = rna_prop.fixed_type
-            if target_type == 'Object' and value in bpy.data.objects: setattr(node, prop_name, bpy.data.objects[value]); return True
-            elif target_type == 'Material' and value in bpy.data.materials: setattr(node, prop_name, bpy.data.materials[value]); return True
-            elif target_type == 'Image' and value in bpy.data.images: setattr(node, prop_name, bpy.data.images[value]); return True
-            elif target_type == 'Collection' and value in bpy.data.collections: setattr(node, prop_name, bpy.data.collections[value]); return True
+        elif prop_type in {'FLOAT', 'INT'} and rna_prop.is_array:
+            if not hasattr(value, "__len__"): return False
+            vec = getattr(node, prop_name)
+            size = len(vec)
+            val_list = list(value)
+            if len(val_list) > size: val_list = val_list[:size]
+            while len(val_list) < size: val_list.append(0.0)
+            setattr(node, prop_name, val_list)
+            return True
 
         setattr(node, prop_name, value)
         return True
     except: return False
 
-# ==============================================================================
-# 4. API 代理
-# ==============================================================================
 def load_db():
     _build_memory_cache()
     return True
-
-def get_node_info(bl_idname):
-    # 不需要具体的 Schema，返回空即可，__init__ 已不再强依赖此函数做过滤
-    return {}
-
-def get_socket_type_map():
-    _build_memory_cache()
-    return _SOCKET_TYPE_MAP
-
-def get_zone_api_type(bl_socket_type):
-    _build_memory_cache()
-    # 优先查表，查不到算法兜底
-    return _SOCKET_TYPE_MAP.get(bl_socket_type, bl_socket_type.replace("NodeSocket", "").upper())
