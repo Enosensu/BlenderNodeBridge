@@ -1,7 +1,7 @@
 # core/deserializer.py
-# GeoNeural Bridge v5.14.1
-# 修复: 强制优先使用 Identifier 匹配插槽，解决同名插槽 (如 A_FLOAT vs A_VEC3) 导致的数值错配
-# 基础: v5.14.0 (AI-Native Milestone)
+# GeoNeural Bridge v5.14.2
+# 修复: 连接恢复逻辑由 "名称优先" 改为 "索引优先"，解决 Vector Math 等节点同名插槽导致的连接错乱问题
+# 基础: v5.14.1
 
 import bpy
 import logging
@@ -13,6 +13,10 @@ except ImportError:
     node_mappings = None
 
 logger = logging.getLogger("GeoNeuralBridge.deserializer")
+
+# ==============================================================================
+# 1. 节点操作原子函数
+# ==============================================================================
 
 class NodeRestorer:
     PROP_BLACKLIST = {
@@ -70,24 +74,19 @@ class NodeRestorer:
 
     @staticmethod
     def restore_socket_defaults(node, inputs_data):
-        """恢复插槽默认值 (High Precision)"""
         for s_data in inputs_data:
             if s_data.get('identifier') == '__extend__' or \
                s_data.get('bl_socket_idname') == 'NodeSocketVirtual': 
                 continue
             
-            # [核心修复 v5.14.1] 匹配逻辑翻转： Identifier Is King
-            # 解决 Compare 节点中 Float 'A' 和 Vector 'A' 同名导致的冲突
+            # 数值恢复也采用 ID 优先策略
             socket = None
             ident = s_data.get('identifier')
             
             if ident:
-                # 1. 尝试精准匹配唯一 ID
-                # 只有这样才能区分 UI 上名字相同的不同插槽
                 socket = next((s for s in node.inputs if s.identifier == ident), None)
             
             if not socket:
-                # 2. 仅当 ID 匹配失败（如 AI 生成的代码未提供 ID）时，才回退到 Name 匹配
                 name = s_data.get('name')
                 if name:
                     socket = next((s for s in node.inputs if s.name == name), None)
@@ -95,15 +94,12 @@ class NodeRestorer:
             if socket and 'default_value' in s_data:
                 try:
                     val = s_data['default_value']
-                    # 资源引用处理
                     if socket.bl_idname in {'NodeSocketObject', 'NodeSocketMaterial', 'NodeSocketCollection', 'NodeSocketTexture', 'NodeSocketImage'}:
                         type_map = {'NodeSocketObject': 'objects', 'NodeSocketMaterial': 'materials', 'NodeSocketCollection': 'collections', 'NodeSocketTexture': 'textures', 'NodeSocketImage': 'images'}
                         col = getattr(bpy.data, type_map.get(socket.bl_idname, ''), None)
                         if col and isinstance(val, str): 
                             target = col.get(val)
                             if target: socket.default_value = target
-                    
-                    # 数值处理 (Vector/Color/Float)
                     elif socket.bl_idname == 'NodeSocketColor' and isinstance(val, list):
                         if len(val) == 3: val.append(1.0)
                         socket.default_value = val
@@ -156,7 +152,7 @@ class DeserializationEngine:
         # Phase 3: 配对
         self._pair_zones(nodes_data)
 
-        # Phase 4: 数值 (使用 Identifier 优先策略)
+        # Phase 4: 数值
         for n_data in nodes_data:
             node = self.node_map.get(n_data.get('name'))
             if not node: continue
@@ -289,11 +285,30 @@ class DeserializationEngine:
                     except: pass
 
     def _find_socket(self, collection, name, index):
-        for s in collection:
-            if s.name == name and s.bl_idname != 'NodeSocketVirtual': return s
+        """
+        [v5.14.2 Fix] 连接查找逻辑翻转: Index First (索引优先)
+        解决 Vector Math 等节点多个输入插槽同名导致的连接错误。
+        """
+        # 1. 优先尝试索引匹配
+        # 如果 JSON 里的索引在范围内，且名字也对得上，那绝对就是它了
         if index is not None and 0 <= index < len(collection):
             s = collection[index]
-            if s.bl_idname != 'NodeSocketVirtual': return s
+            if s.name == name and s.bl_idname != 'NodeSocketVirtual':
+                return s
+        
+        # 2. 回退到名称匹配 (Name Fallback)
+        # 只有当索引对不上 (Blender版本变了导致插槽移位) 时才用这个
+        for s in collection:
+            if s.name == name and s.bl_idname != 'NodeSocketVirtual': 
+                return s
+        
+        # 3. 最后的手段 (Blind Index)
+        # 名字对不上，但索引还在，死马当活马医
+        if index is not None and 0 <= index < len(collection):
+            s = collection[index]
+            if s.bl_idname != 'NodeSocketVirtual': 
+                return s
+                
         return None
 
     def _restore_frames(self, frames_data):
