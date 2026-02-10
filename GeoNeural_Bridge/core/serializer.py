@@ -1,18 +1,22 @@
 # core/serializer.py
-# GeoNeural Bridge v5.14.0 (AI-Native Milestone)
-# 修复: Zone Items 序列化增加冗余类型信息，提高容错性
+# GeoNeural Bridge v5.14.1
+# 修复: 智能剔除 unavailable (无效/隐藏) 的插槽，大幅减少 AI 上下文噪音
+# 基础: v5.14.0 (AI-Native Milestone)
 
 import bpy
 import logging
 from mathutils import Vector, Euler, Matrix, Color, Quaternion
 
-# 导入新的映射库
 try:
     from . import node_mappings
 except ImportError:
     node_mappings = None
 
 logger = logging.getLogger("GeoNeuralBridge.serializer")
+
+# ==============================================================================
+# 1. 基础工具集
+# ==============================================================================
 
 class DataCleaner:
     @staticmethod
@@ -40,8 +44,11 @@ class DataCleaner:
             "elements": [{"pos": round(e.position, 3), "color": list(e.color)} for e in ramp.elements]
         }
 
+# ==============================================================================
+# 2. 精简过滤器
+# ==============================================================================
+
 class CompactFilter:
-    # 保持 v5.13.32 的精简策略
     NODE_PROP_BLACKLIST = {
         'location', 'location_absolute', 
         'width', 'height', 'color', 'use_custom_color', 
@@ -79,13 +86,15 @@ class CompactFilter:
         for key in list(socket_data.keys()):
             if key in CompactFilter.SOCKET_PROP_BLACKLIST: del socket_data[key]
 
+# ==============================================================================
+# 3. 序列化逻辑
+# ==============================================================================
+
 class SocketSerializer:
     @staticmethod
     def get_bl_idname(socket):
         if hasattr(socket, 'bl_socket_idname'): return socket.bl_socket_idname
-        # 回退使用映射库
-        if node_mappings:
-            return node_mappings.get_socket_class_name(socket.type)
+        if node_mappings: return node_mappings.get_socket_class_name(socket.type)
         return 'NodeSocketFloat'
 
     @staticmethod
@@ -107,7 +116,6 @@ class SocketSerializer:
             val = DataCleaner.clean_data(socket.default_value)
             if val is not None: data['default_value'] = val
         
-        # Bundle 递归
         if bl_idname == 'NodeSocketBundle' or data['type'] == 'BUNDLE':
             data['is_bundle'] = True
             data['bundle_items'] = SocketSerializer._serialize_bundle_items(socket)
@@ -122,7 +130,6 @@ class SocketSerializer:
             if hasattr(tree, 'interface') and hasattr(tree.interface, 'items_tree'):
                 for item in tree.interface.items_tree:
                     if hasattr(item, 'parent') and item.parent and getattr(item.parent, 'name', '') == socket.name:
-                        # 使用新映射确保准确性
                         sock_type = getattr(item, 'socket_type', 'FLOAT')
                         items.append({
                             'name': item.name,
@@ -150,11 +157,23 @@ class NodeSerializer:
         
         if node.parent: data['parent'] = node.parent.name
 
-        data['inputs'] = [SocketSerializer.serialize(s, i, 'INPUT') for i, s in enumerate(node.inputs)]
-        data['outputs'] = [SocketSerializer.serialize(s, i, 'OUTPUT') for i, s in enumerate(node.outputs)]
+        # [核心修复 v5.14.1] 
+        # 使用 socket.is_unavailable 过滤掉当前节点模式下隐藏/无效的插槽
+        # 这将消除 JSON 中的大量冗余信息 (如 "A_INT", "A_COL" 等)
+        valid_inputs = []
+        for i, s in enumerate(node.inputs):
+            if hasattr(s, "is_unavailable") and s.is_unavailable: continue
+            valid_inputs.append(SocketSerializer.serialize(s, i, 'INPUT'))
+        data['inputs'] = valid_inputs
+
+        valid_outputs = []
+        for i, s in enumerate(node.outputs):
+            if hasattr(s, "is_unavailable") and s.is_unavailable: continue
+            valid_outputs.append(SocketSerializer.serialize(s, i, 'OUTPUT'))
+        data['outputs'] = valid_outputs
+
         data['properties'] = NodeSerializer._serialize_properties(node)
 
-        # Zone 状态捕获
         if node.bl_idname in ('GeometryNodeSimulationInput', 'GeometryNodeSimulationOutput'):
             data['simulation_state'] = NodeSerializer._serialize_zone_state(node, 'state_items')
         elif node.bl_idname in ('GeometryNodeRepeatInput', 'GeometryNodeRepeatOutput'):
@@ -200,7 +219,6 @@ class NodeSerializer:
         collection = getattr(output_node, collection_name, None)
         if collection:
             for item in collection:
-                # [修复] 增加冗余信息：同时记录 socket_type(Enum) 和 bl_socket_idname(Class)
                 s_type = getattr(item, 'socket_type', 'FLOAT')
                 item_data = {
                     'name': item.name,
@@ -238,7 +256,7 @@ class SerializationEngine:
                     self.connected_sockets.add((link.to_node.name, link.to_socket.identifier))
 
         data = {
-            "version": "v5.13.33 Strict",
+            "version": "v5.14.1 Strict",
             "tree_type": self.tree.bl_idname,
             "nodes": [],
             "links": links_data,

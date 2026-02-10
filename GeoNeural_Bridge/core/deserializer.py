@@ -1,23 +1,18 @@
 # core/deserializer.py
-# GeoNeural Bridge v5.14.0 (AI-Native Milestone)
-# 修复: 支持从节点数据中读取 'parent' 字段，解决 AI 生成的组框无法包含子节点的问题
-# 架构: 保持 5 阶段流水线 (Structure -> Definition -> Pairing -> Values -> Linking/Parenting)
+# GeoNeural Bridge v5.14.1
+# 修复: 强制优先使用 Identifier 匹配插槽，解决同名插槽 (如 A_FLOAT vs A_VEC3) 导致的数值错配
+# 基础: v5.14.0 (AI-Native Milestone)
 
 import bpy
 import logging
 from mathutils import Vector, Euler, Matrix, Color, Quaternion
 
-# 导入映射库
 try:
     from . import node_mappings
 except ImportError:
     node_mappings = None
 
 logger = logging.getLogger("GeoNeuralBridge.deserializer")
-
-# ==============================================================================
-# 1. 节点操作原子函数
-# ==============================================================================
 
 class NodeRestorer:
     PROP_BLACKLIST = {
@@ -75,24 +70,40 @@ class NodeRestorer:
 
     @staticmethod
     def restore_socket_defaults(node, inputs_data):
+        """恢复插槽默认值 (High Precision)"""
         for s_data in inputs_data:
             if s_data.get('identifier') == '__extend__' or \
                s_data.get('bl_socket_idname') == 'NodeSocketVirtual': 
                 continue
             
-            socket = next((s for s in node.inputs if s.name == s_data.get('name')), None)
+            # [核心修复 v5.14.1] 匹配逻辑翻转： Identifier Is King
+            # 解决 Compare 节点中 Float 'A' 和 Vector 'A' 同名导致的冲突
+            socket = None
+            ident = s_data.get('identifier')
+            
+            if ident:
+                # 1. 尝试精准匹配唯一 ID
+                # 只有这样才能区分 UI 上名字相同的不同插槽
+                socket = next((s for s in node.inputs if s.identifier == ident), None)
+            
             if not socket:
-                socket = next((s for s in node.inputs if s.identifier == s_data.get('identifier')), None)
+                # 2. 仅当 ID 匹配失败（如 AI 生成的代码未提供 ID）时，才回退到 Name 匹配
+                name = s_data.get('name')
+                if name:
+                    socket = next((s for s in node.inputs if s.name == name), None)
 
             if socket and 'default_value' in s_data:
                 try:
                     val = s_data['default_value']
+                    # 资源引用处理
                     if socket.bl_idname in {'NodeSocketObject', 'NodeSocketMaterial', 'NodeSocketCollection', 'NodeSocketTexture', 'NodeSocketImage'}:
                         type_map = {'NodeSocketObject': 'objects', 'NodeSocketMaterial': 'materials', 'NodeSocketCollection': 'collections', 'NodeSocketTexture': 'textures', 'NodeSocketImage': 'images'}
                         col = getattr(bpy.data, type_map.get(socket.bl_idname, ''), None)
                         if col and isinstance(val, str): 
                             target = col.get(val)
                             if target: socket.default_value = target
+                    
+                    # 数值处理 (Vector/Color/Float)
                     elif socket.bl_idname == 'NodeSocketColor' and isinstance(val, list):
                         if len(val) == 3: val.append(1.0)
                         socket.default_value = val
@@ -123,12 +134,12 @@ class DeserializationEngine:
         links_data = json_data.get("links", [])
         frames_data = json_data.get("frames", {})
 
-        # Phase 1: 骨架构建 (Output 优先)
+        # Phase 1: 骨架
         ordered_nodes = self._sort_priority(nodes_data)
         for n_data in ordered_nodes:
             self._create_node_skeleton(n_data, offset)
 
-        # Phase 2: 区域定义
+        # Phase 2: 定义
         for n_data in nodes_data:
             node = self.node_map.get(n_data.get('name'))
             if not node: continue
@@ -145,7 +156,7 @@ class DeserializationEngine:
         # Phase 3: 配对
         self._pair_zones(nodes_data)
 
-        # Phase 4: 默认值
+        # Phase 4: 数值 (使用 Identifier 优先策略)
         for n_data in nodes_data:
             node = self.node_map.get(n_data.get('name'))
             if not node: continue
@@ -154,25 +165,18 @@ class DeserializationEngine:
                 for i, out in enumerate(n_data['outputs']):
                     if i < len(node.outputs) and out.get('hide'): node.outputs[i].hide = True
 
-        # Phase 5: 连接与父子关系 (Parenting)
+        # Phase 5: 连接与父子
         self._restore_links(links_data)
         
-        # [核心修复] 聚合所有来源的父子关系
-        # 1. 优先使用 frames 字典 (Blender 内部复制)
-        # 2. 补充 nodes 列表中的 parent 字段 (AI 生成 / Compact 模式)
         final_frames = frames_data.copy()
         for n_data in nodes_data:
             if 'parent' in n_data and n_data['parent']:
                 child_name = n_data.get('name')
                 parent_name = n_data.get('parent')
-                if child_name and parent_name:
-                    # 如果 frames 中已有定义，不覆盖（信任 frames 字典优先）
-                    if child_name not in final_frames:
-                        final_frames[child_name] = parent_name
-                        
+                if child_name and parent_name and child_name not in final_frames:
+                    final_frames[child_name] = parent_name
         self._restore_frames(final_frames)
 
-        # 后处理
         for node in self.node_map.values(): node.select = True
         return list(self.node_map.values())
 
@@ -198,14 +202,11 @@ class DeserializationEngine:
         node.name = orig_name 
         self.node_map[orig_name] = node
 
-        # 智能平铺布局
-        # 如果数据中没有 location（AI 生成），则按顺序平铺，避免全部堆叠在 (0,0)
         if 'location' in n_data:
             loc = n_data['location']
             node.location = (loc[0] + offset[0], loc[1] + offset[1])
         else:
             idx = len(self.node_map)
-            # 每个节点向右偏移 220 像素，向下稍微偏移一点
             node.location = (offset[0] + (idx * 220), offset[1] - (idx * 50))
 
         if 'width' in n_data: node.width = n_data['width']
@@ -223,21 +224,15 @@ class DeserializationEngine:
             raw_type = item.get('socket_type', 'FLOAT')
             bl_idname = item.get('bl_socket_idname')
             
-            # 使用 mappings 转换
             if node_mappings:
-                if bl_idname:
-                    api_type = node_mappings.get_api_enum(bl_idname)
-                else:
-                    api_type = node_mappings.get_api_enum(raw_type)
+                if bl_idname: api_type = node_mappings.get_api_enum(bl_idname)
+                else: api_type = node_mappings.get_api_enum(raw_type)
             else:
                 api_type = 'FLOAT'
 
             if api_type == 'VIRTUAL': continue
-            
-            try:
-                collection.new(api_type, name)
-            except Exception as e:
-                logger.warning(f"Zone item failed {name}/{api_type}: {e}")
+            try: collection.new(api_type, name)
+            except: 
                 try: collection.new('GEOMETRY', name)
                 except: pass
 
@@ -249,9 +244,8 @@ class DeserializationEngine:
                 name = item.get("name", "Value")
                 raw_type = item.get("data_type", "FLOAT")
                 api_type = node_mappings.get_api_enum(raw_type) if node_mappings else raw_type
-                try:
-                    node.capture_items.new(api_type, name)
-                except:
+                try: node.capture_items.new(api_type, name)
+                except: 
                     try: node.capture_items.new('FLOAT', name)
                     except: pass
         except: pass

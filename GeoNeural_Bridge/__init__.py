@@ -1,14 +1,17 @@
 # __init__.py
-# GeoNeural Bridge v5.14.0 (AI-Native Milestone)
-# 恢复 AI 精简模式开关与极简 UI 布局
+# GeoNeural Bridge v5.14.1 - Precision Update
+# 更新内容: 
+# 1. Serializer: 智能剔除 unavailable 插槽，解决 AI 上下文冗余问题
+# 2. Deserializer: 强制优先 Identifier 匹配，解决同名插槽数值错配问题
+# 基础: v5.14.0 (AI-Native Milestone)
 
 bl_info = {
-    "name": "GeoNeural Bridge (v5.13.30 Strict+UX)",
+    "name": "GeoNeural Bridge (v5.14.1 Precision)",
     "author": "Dev_Nodes_V5 & Dev_Analyst",
-    "version": (5, 13, 30),
+    "version": (5, 14, 1),
     "blender": (4, 0, 0),
     "location": "Node Editor > Sidebar > GeoNeural",
-    "description": "模块化版本：含AI精简模式，Zone自动配对修复。",
+    "description": "热修复：剔除冗余插槽数据，修复同名插槽数值注入错误。",
     "category": "Node",
 }
 
@@ -28,7 +31,7 @@ for m in modules_to_reload:
     importlib.reload(m)
 
 # ==============================================================================
-# 1. UI 面板 (极简设计)
+# 1. UI 面板
 # ==============================================================================
 
 class GN_PT_MainPanel(bpy.types.Panel):
@@ -42,33 +45,33 @@ class GN_PT_MainPanel(bpy.types.Panel):
     def draw(self, context):
         layout = self.layout
         scene = context.scene
-        
-        # --- 状态指示 ---
-        if node_mappings:
-            layout.label(text="核心库: 正常", icon='CHECKMARK')
-        else:
-            layout.label(text="核心库: 丢失", icon='ERROR')
+
+        try: 
+            db_ok = node_mappings.load_db()
+            if db_ok:
+                layout.label(text="AI 核心已就绪", icon='CHECKMARK')
+            else:
+                layout.label(text="映射库未加载", icon='INFO')
+        except: 
+            layout.label(text="系统异常", icon='ERROR')
 
         layout.separator()
 
-        # --- 发送区 (Copy) ---
-        # 恢复 AI 精简模式开关
-        layout.prop(scene, "gn_compact_mode", text="AI 精简模式 (省Token)")
+        box = layout.box()
+        box.label(text="发送给 AI (复制):")
         
-        col = layout.column(align=True)
-        col.scale_y = 1.4
-        # 只保留 "复制选中"
-        col.operator("geonb.copy_nodes", text="复制选中节点 (Copy)", icon='COPYDOWN')
+        row = box.row()
+        row.prop(scene, "gn_compact_mode", text="精简模式 (AI)")
         
+        r = box.row()
+        r.operator("geonb.copy_nodes", text="复制选中节点", icon='COPYDOWN')
+
         layout.separator()
 
-        # --- 接收区 (Paste) ---
         col2 = layout.column(align=True)
         col2.scale_y = 1.4
-        # 只保留 "插入粘贴" (Append)
-        col2.operator("geonb.paste_nodes", text="插入粘贴 (Paste)", icon='PASTEDOWN')
+        col2.operator("geonb.paste_nodes", text="智能粘贴 (Paste)", icon='PASTEDOWN')
         
-        # 调试选项折叠
         layout.separator()
         row = layout.row()
         row.prop(scene, "gn_debug_mode", text="调试日志")
@@ -78,32 +81,28 @@ class GN_PT_MainPanel(bpy.types.Panel):
 # ==============================================================================
 
 def register():
-    # 1. 注册属性
     bpy.types.Scene.gn_debug_mode = bpy.props.BoolProperty(default=False)
-    # [恢复] 精简模式开关
     bpy.types.Scene.gn_compact_mode = bpy.props.BoolProperty(
         name="Compact Mode",
-        description="Strip UI data to save Tokens for AI context",
+        description="去除 UI 数据以节省 Token，适合发送给 AI",
         default=True
     )
 
-    # 2. 注册模块
     clipboard.register()
     bpy.utils.register_class(GN_PT_MainPanel)
     
-    if hasattr(node_mappings, '_build_memory_cache'):
-        node_mappings._build_memory_cache()
-    elif hasattr(node_mappings, 'load_db'):
+    if hasattr(node_mappings, 'load_db'):
         node_mappings.load_db()
-    
-    print(f"[GeoNeural Bridge] v{bl_info['version']} Registered.")
 
 def unregister():
+    if hasattr(node_mappings, 'unload_db'): 
+        pass
+        
     bpy.utils.unregister_class(GN_PT_MainPanel)
     clipboard.unregister()
-    del bpy.types.Scene.gn_debug_mode
+    
     del bpy.types.Scene.gn_compact_mode
-    print(f"[GeoNeural Bridge] Unregistered.")
+    del bpy.types.Scene.gn_debug_mode
 
 if __name__ == "__main__":
     register()
