@@ -1,63 +1,143 @@
 # operators/clipboard.py
-# GeoNeural Bridge v5.13.30 - Clipboard Operator
-# 修复: 日志系统未响应调试开关的问题
-# 增强: 增加控制台日志格式化，输出详细追踪信息
+# GeoNeural Bridge v5.13.39
+# 修复: 完整移植 v5.13.28 的 DataUtils.robust_json_load 逻辑
+# 功能: 支持 Markdown 代码块、C风格注释、尾部逗号自动修复
 
 import bpy
 import sys
 import json
+import re
 import logging
 import traceback
 from bpy.types import Operator
 from ..core.serializer import SerializationEngine
 from ..core.deserializer import DeserializationEngine
+try:
+    from ..core import node_mappings
+except ImportError:
+    node_mappings = None
 
-# 获取父级 Logger
-logger = logging.getLogger("GeoNeuralBridge")
+logger = logging.getLogger("GeoNeuralBridge.clipboard")
 
 # ==============================================================================
-# 0. 日志配置辅助函数 (Log Configuration)
+# 0. 日志配置
 # ==============================================================================
 
 def configure_logging(context):
-    """
-    根据场景属性动态配置日志级别和格式。
-    在每次操作执行前调用，确保开关即时生效。
-    """
     try:
-        # 读取开关状态
         debug_mode = getattr(context.scene, "gn_debug_mode", False)
         target_level = logging.DEBUG if debug_mode else logging.INFO
-        
-        # 设置总记录器级别
         logger.setLevel(target_level)
-        
-        # 确保它的子记录器 (serializer/deserializer) 也继承该级别
         logging.getLogger("GeoNeuralBridge.serializer").setLevel(target_level)
         logging.getLogger("GeoNeuralBridge.deserializer").setLevel(target_level)
         logging.getLogger("GeoNeuralBridge.clipboard").setLevel(target_level)
-
-        # 配置输出处理程序 (Handler)
-        # 防止重复添加 Handler 导致日志重复打印
+        
         if not logger.handlers:
             handler = logging.StreamHandler(sys.stdout)
-            # 格式: [时间] [级别] [模块] 信息
-            formatter = logging.Formatter('[GN-Bridge] %(levelname)s: %(message)s')
-            handler.setFormatter(formatter)
+            handler.setFormatter(logging.Formatter('[GN-Bridge] %(levelname)s: %(message)s'))
             logger.addHandler(handler)
         else:
-            # 如果已有 Handler，确保级别同步
-            for h in logger.handlers:
-                h.setLevel(target_level)
-        
-        if debug_mode:
-            logger.debug("Debug mode enabled. Verbose logging active.")
-            
-    except Exception as e:
-        print(f"[GN-Bridge] Logging setup failed: {e}")
+            for h in logger.handlers: h.setLevel(target_level)
+    except: pass
 
 # ==============================================================================
-# 1. 剪贴板管理器
+# 1. 强力数据清洗器 (移植自 v5.13.28 DataUtils)
+# ==============================================================================
+
+class RobustLoader:
+    @staticmethod
+    def load_json(text):
+        """
+        [Core Fix] 移植自 v5.13.28 的 robust_json_load
+        能够处理:
+        1. Markdown 代码块 (```json ... ```)
+        2. C 风格注释 (// 和 /* ... */)
+        3. JSON 尾部多余逗号
+        """
+        if not text: return None
+        
+        # 1. 去除 Markdown 包裹
+        if "```" in text:
+            pattern = r"```json(.*?)```|```(.*?)```"
+            match = re.search(pattern, text, re.DOTALL)
+            if match: 
+                text = match.group(1) if match.group(1) else match.group(2)
+        
+        # 2. 去除注释 (同时保留 URL 中的 //)
+        # 正则逻辑：匹配字符串 OR 匹配注释
+        pattern = r'("[^"\\]*(?:\\.[^"\\]*)*")|(\/\/.*|\/\*[\s\S]*?\*\/)'
+        text = re.sub(pattern, lambda m: m.group(1) if m.group(1) else "", text)
+        
+        # 3. 修复尾部逗号 (Trailing Commas)
+        # 例如: { "a": 1, } -> { "a": 1 }
+        text = re.sub(r',(\s*[}\]])', r'\1', text)
+        
+        try: 
+            return json.loads(text)
+        except json.JSONDecodeError as e:
+            logger.debug(f"JSON Parse Error: {e}")
+            return None
+
+class DataSanitizer:
+    @staticmethod
+    def _guess_socket_type(value):
+        if isinstance(value, bool): return "NodeSocketBool"
+        if isinstance(value, int): return "NodeSocketInt"
+        if isinstance(value, float): return "NodeSocketFloat"
+        if isinstance(value, (list, tuple)):
+            if len(value) == 3: return "NodeSocketVector"
+            if len(value) == 4: return "NodeSocketColor"
+        if isinstance(value, str): return "NodeSocketString"
+        return "NodeSocketFloat"
+
+    @staticmethod
+    def sanitize(data):
+        if not isinstance(data, dict): return data
+        if node_mappings: node_mappings.load_db()
+
+        nodes = data.get('nodes', [])
+        sanitized_nodes = []
+        for n in nodes:
+            # 类型映射
+            raw_type = n.get('bl_idname') or n.get('type')
+            if raw_type and node_mappings:
+                n['bl_idname'] = node_mappings.resolve_node_idname(raw_type)
+            else:
+                n['bl_idname'] = raw_type
+
+            # 属性映射
+            if 'properties' not in n and 'params' in n:
+                n['properties'] = n['params']
+            
+            # 输入映射
+            if 'inputs' in n and isinstance(n['inputs'], dict):
+                new_inputs = []
+                for name, val in n['inputs'].items():
+                    guessed_type = DataSanitizer._guess_socket_type(val)
+                    new_inputs.append({
+                        "name": name, "identifier": name, "default_value": val,
+                        "bl_socket_idname": guessed_type
+                    })
+                n['inputs'] = new_inputs
+                
+            sanitized_nodes.append(n)
+        data['nodes'] = sanitized_nodes
+
+        # 连接映射
+        links = data.get('links', [])
+        sanitized_links = []
+        for l in links:
+            new_link = l.copy()
+            if 'src' in l: new_link['from_node'] = l['src']
+            if 'src_sock' in l: new_link['from_socket'] = l['src_sock']
+            if 'dst' in l: new_link['to_node'] = l['dst']
+            if 'dst_sock' in l: new_link['to_socket'] = l['dst_sock']
+            sanitized_links.append(new_link)
+        data['links'] = sanitized_links
+        return data
+
+# ==============================================================================
+# 2. 剪贴板管理器
 # ==============================================================================
 
 class ClipboardManager:
@@ -69,89 +149,57 @@ class ClipboardManager:
         try:
             json_str = json.dumps(data, indent=2, ensure_ascii=False)
             context.window_manager.clipboard = json_str
-            logger.debug(f"Synced to system clipboard ({len(json_str)} chars)")
-        except Exception as e:
-            logger.warning(f"System clipboard sync failed: {e}")
+        except: pass
 
     @staticmethod
     def get(context):
-        # 1. 优先内存
-        mem_data = ClipboardManager._internal_storage
-        if mem_data and mem_data.get('nodes'):
-            logger.debug("Loaded data from Internal Memory")
-            return mem_data
-        
-        # 2. 其次系统剪贴板
+        # 1. 优先解析系统剪贴板 (使用强力加载器)
         try:
             sys_clip = context.window_manager.clipboard
-            if sys_clip and sys_clip.strip().startswith('{'):
-                data = json.loads(sys_clip)
-                if isinstance(data, dict) and 'nodes' in data:
-                    ClipboardManager._internal_storage = data
-                    logger.debug("Loaded data from System Clipboard")
-                    return data
-        except json.JSONDecodeError:
-            pass
-        except Exception as e:
-            logger.debug(f"Clipboard read exception: {e}")
-            
+            if sys_clip:
+                data = RobustLoader.load_json(sys_clip)
+                if data and isinstance(data, dict) and ('nodes' in data or 'tree_type' in data):
+                    logger.info("Detected AI JSON (Sanitized) -> Using System Clipboard")
+                    return DataSanitizer.sanitize(data)
+        except: pass
+
+        # 2. 回退到内部存储
+        if ClipboardManager._internal_storage:
+            logger.info("Using Internal Memory")
+            return ClipboardManager._internal_storage
         return None
 
 # ==============================================================================
-# 2. 复制操作符
+# 3. 操作符定义
 # ==============================================================================
 
 class GEONB_OT_CopyNodes(Operator):
     bl_idname = "geonb.copy_nodes"
     bl_label = "Copy Nodes"
-    bl_description = "Serialize selected nodes to JSON"
     bl_options = {'REGISTER'}
 
     @classmethod
     def poll(cls, context):
-        space = context.space_data
-        return space and space.type == 'NODE_EDITOR' and space.edit_tree
+        return context.space_data and context.space_data.type == 'NODE_EDITOR' and context.space_data.edit_tree
 
     def execute(self, context):
-        # [Fix] 初始化日志系统
         configure_logging(context)
-        
         tree = context.space_data.edit_tree
         is_compact = getattr(context.scene, "gn_compact_mode", False)
-        
-        logger.info(f"Start Copy: Compact={is_compact}")
-
         try:
             engine = SerializationEngine(tree, context, selected_only=True, compact=is_compact)
             data = engine.execute()
-            
             if not data['nodes']:
-                self.report({'WARNING'}, "No nodes selected")
-                return {'CANCELLED'}
-
+                self.report({'WARNING'}, "No nodes selected"); return {'CANCELLED'}
             ClipboardManager.set(data, context)
-            
-            count = len(data['nodes'])
-            mode_text = " (Compact)" if is_compact else ""
-            self.report({'INFO'}, f"Copied {count} nodes{mode_text}")
+            self.report({'INFO'}, f"Copied {len(data['nodes'])} nodes")
             return {'FINISHED'}
-            
         except Exception as e:
-            # 捕获并打印完整堆栈，方便调试
-            logger.error(f"Copy Operation Failed: {e}")
-            if getattr(context.scene, "gn_debug_mode", False):
-                traceback.print_exc()
-            self.report({'ERROR'}, f"Copy Failed: {str(e)}")
-            return {'CANCELLED'}
-
-# ==============================================================================
-# 3. 粘贴操作符
-# ==============================================================================
+            logger.error(f"Copy Failed: {e}"); return {'CANCELLED'}
 
 class GEONB_OT_PasteNodes(Operator):
     bl_idname = "geonb.paste_nodes"
     bl_label = "Paste Nodes"
-    bl_description = "Paste nodes from clipboard"
     bl_options = {'REGISTER', 'UNDO'}
 
     @classmethod
@@ -159,76 +207,39 @@ class GEONB_OT_PasteNodes(Operator):
         return context.space_data and context.space_data.type == 'NODE_EDITOR'
 
     def execute(self, context):
-        # [Fix] 初始化日志系统
         configure_logging(context)
-        
         tree = context.space_data.edit_tree
-        
         try:
             data = ClipboardManager.get(context)
             if not data or not data.get('nodes'):
-                self.report({'WARNING'}, "Clipboard empty")
-                return {'CANCELLED'}
+                self.report({'WARNING'}, "Clipboard empty"); return {'CANCELLED'}
 
-            logger.info(f"Start Paste: {len(data['nodes'])} nodes from version {data.get('version', 'unknown')}")
-
-            # 粘贴前取消选中
             bpy.ops.node.select_all(action='DESELECT')
-
             offset = self._calculate_smart_offset(context, data['nodes'])
-            logger.debug(f"Calculated paste offset: {offset}")
             
             engine = DeserializationEngine(tree, context)
             created_nodes = engine.deserialize_tree(data, offset=offset)
 
             self.report({'INFO'}, f"Pasted {len(created_nodes)} nodes")
             return {'FINISHED'}
-            
         except Exception as e:
-            logger.error(f"Paste Operation Failed: {e}")
-            if getattr(context.scene, "gn_debug_mode", False):
-                traceback.print_exc()
-            self.report({'ERROR'}, f"Paste Failed: {str(e)}")
-            return {'CANCELLED'}
+            logger.error(f"Paste Failed: {e}"); self.report({'ERROR'}, str(e)); return {'CANCELLED'}
 
     def _calculate_smart_offset(self, context, nodes_data):
-        if not nodes_data: return (0, 0)
-        
-        # 提取坐标（Compact模式下可能没有）
         locs = [n.get('location', [0, 0]) for n in nodes_data]
-        if not locs: 
-            return (0,0)
-        
-        min_x = min(l[0] for l in locs)
-        max_x = max(l[0] for l in locs)
-        min_y = min(l[1] for l in locs)
-        max_y = max(l[1] for l in locs)
-        
-        src_center_x = (min_x + max_x) / 2
-        src_center_y = (min_y + max_y) / 2
-
+        if not locs: return (0,0)
+        min_x = min(l[0] for l in locs); max_x = max(l[0] for l in locs)
+        min_y = min(l[1] for l in locs); max_y = max(l[1] for l in locs)
+        src_center_x = (min_x + max_x) / 2; src_center_y = (min_y + max_y) / 2
         try:
-            region = context.region
-            # 确保我们在节点编辑器区域内
             if context.space_data.type == 'NODE_EDITOR':
-                # region_to_view: 将屏幕像素坐标转换为节点图表坐标
-                center_x, center_y = context.region.view2d.region_to_view(
-                    region.width / 2, region.height / 2
-                )
-                return (center_x - src_center_x, center_y - src_center_y)
-        except Exception as e:
-            logger.debug(f"Smart offset calculation failed (using default): {e}")
-        
+                cx, cy = context.region.view2d.region_to_view(context.region.width / 2, context.region.height / 2)
+                return (cx - src_center_x, cy - src_center_y)
+        except: pass
         return (20, -20)
 
-# ==============================================================================
-# 4. 注册
-# ==============================================================================
-
 classes = (GEONB_OT_CopyNodes, GEONB_OT_PasteNodes)
-
 def register():
-    for cls in classes: bpy.utils.register_class(cls)
-
+    for c in classes: bpy.utils.register_class(c)
 def unregister():
-    for cls in reversed(classes): bpy.utils.unregister_class(cls)
+    for c in reversed(classes): bpy.utils.unregister_class(c)
