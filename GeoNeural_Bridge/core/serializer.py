@@ -1,5 +1,5 @@
 # core/serializer.py
-# GeoNeural Bridge v5.13.33 (Based on v5.13.32)
+# GeoNeural Bridge v5.14.0 (AI-Native Milestone)
 # 修复: Zone Items 序列化增加冗余类型信息，提高容错性
 
 import bpy

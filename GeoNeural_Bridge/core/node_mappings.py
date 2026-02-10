@@ -1,5 +1,5 @@
 # core/node_mappings.py
-# GeoNeural Bridge v5.13.37
+# GeoNeural Bridge v5.14.0 (AI-Native Milestone)
 # 修复: 恢复 SOCKET_TYPE_TO_IDNAME 静态映射 (Type Safety)
 # 功能: 提供 API 枚举标准化与 AI 模糊匹配支持
 

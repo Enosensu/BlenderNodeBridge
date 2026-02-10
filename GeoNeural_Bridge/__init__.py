@@ -1,5 +1,5 @@
 # __init__.py
-# GeoNeural Bridge v5.13.30 - UX Restoration
+# GeoNeural Bridge v5.14.0 (AI-Native Milestone)
 # 恢复 AI 精简模式开关与极简 UI 布局
 
 bl_info = {

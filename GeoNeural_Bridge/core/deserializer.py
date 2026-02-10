@@ -1,5 +1,5 @@
 # core/deserializer.py
-# GeoNeural Bridge v5.13.38
+# GeoNeural Bridge v5.14.0 (AI-Native Milestone)
 # 修复: 支持从节点数据中读取 'parent' 字段，解决 AI 生成的组框无法包含子节点的问题
 # 架构: 保持 5 阶段流水线 (Structure -> Definition -> Pairing -> Values -> Linking/Parenting)
 

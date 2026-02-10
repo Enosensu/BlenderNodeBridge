@@ -1,5 +1,5 @@
 # operators/clipboard.py
-# GeoNeural Bridge v5.13.39
+# GeoNeural Bridge v5.14.0 (AI-Native Milestone)
 # 修复: 完整移植 v5.13.28 的 DataUtils.robust_json_load 逻辑
 # 功能: 支持 Markdown 代码块、C风格注释、尾部逗号自动修复
 
