@@ -1,11 +1,13 @@
 # core/deserializer.py
-# GeoNeural Bridge v5.14.9
-# 修复: 引入智能索引偏移 (Smart Shift)，解决 AI 使用 "Vector_001" 指代第一个插槽 (Blender实际为 "Vector") 导致的连接错位
-# 基础: v5.14.8
+# GeoNeural Bridge v5.14.10
+# 修复: 增强属性枚举值的模糊匹配能力
+# 解决: AI 输出 "EULER" 无法匹配 Blender "EULER_XYZ" 导致节点属性回退到默认值的问题
+# 基础: v5.14.9 (Smart Shift)
 
 import bpy
 import logging
 import re
+import difflib
 from mathutils import Vector, Euler, Matrix, Color, Quaternion
 
 try:
@@ -48,8 +50,15 @@ class NodeRestorer:
 
             if hasattr(node, prop_name):
                 try:
-                    rna = node.bl_rna.properties.get(prop_name)
-                    if rna and rna.is_readonly: continue
+                    rna_prop = node.bl_rna.properties.get(prop_name)
+                    if rna_prop and rna_prop.is_readonly: continue
+                    
+                    # [v5.14.10 增强] 针对枚举类型的智能匹配
+                    if rna_prop and rna_prop.type == 'ENUM':
+                        if NodeRestorer._set_enum_property_smart(node, prop_name, value, rna_prop):
+                            continue # 设置成功，跳过默认逻辑
+
+                    # 常规类型处理
                     current = getattr(node, prop_name)
                     if isinstance(current, (Vector, Color, Euler)) and isinstance(value, list):
                         setattr(node, prop_name, type(current)(value))
@@ -58,7 +67,47 @@ class NodeRestorer:
                         setattr(node, prop_name, mat)
                     else:
                         setattr(node, prop_name, value)
-                except: pass
+                except Exception as e:
+                    pass
+
+    @staticmethod
+    def _set_enum_property_smart(node, prop_name, value, rna_prop):
+        """
+        [v5.14.10 新增] 智能设置枚举属性
+        处理 AI "EULER" -> Blender "EULER_XYZ" 的映射
+        """
+        if not isinstance(value, str): return False
+        
+        # 获取所有合法选项
+        valid_items = [item.identifier for item in rna_prop.enum_items]
+        
+        # 1. 精确匹配 (最为优先)
+        if value in valid_items:
+            setattr(node, prop_name, value)
+            return True
+            
+        # 2. 归一化匹配 (忽略大小写)
+        upper_val = value.upper()
+        for item in valid_items:
+            if item == upper_val:
+                setattr(node, prop_name, item)
+                return True
+
+        # 3. 前缀/包含匹配 (AI 常用简写)
+        # 例如: AI="EULER" -> Blender="EULER_XYZ"
+        # 优先匹配 "EULER_XYZ" (默认顺序) 而不是 "EULER_YXZ"
+        for item in valid_items:
+            if item.startswith(upper_val) or upper_val in item:
+                setattr(node, prop_name, item)
+                return True
+        
+        # 4. 模糊匹配 (Difflib)
+        matches = difflib.get_close_matches(upper_val, valid_items, n=1, cutoff=0.6)
+        if matches:
+            setattr(node, prop_name, matches[0])
+            return True
+            
+        return False
 
     @staticmethod
     def _restore_color_ramp(node, prop_name, ramp_data):
@@ -319,54 +368,33 @@ class DeserializationEngine:
                     except: pass
 
     def _find_socket(self, collection, name, index):
-        """
-        [v5.14.9 Fix] 智能偏移修正 (Smart Offset Shifting)
-        解决 AI 使用 "Vector_001" 指代第1个插槽 (Blender实际为 "Vector") 的问题。
-        """
-        # 1. 索引匹配
         if index is not None and 0 <= index < len(collection):
             s = collection[index]
             if s.name == name or s.identifier == name:
                 return s
         
-        # 2. 标识符匹配 (带智能偏移检测)
         for i, s in enumerate(collection):
             if s.identifier == name:
-                # [核心逻辑] 如果找到了精确匹配 (如 Vector_001), 检查是否发生了 AI 的索引偏移
-                # 条件: 
-                # 1. 当前是带有数字后缀的名称
-                # 2. 集合中存在该名称的“基名”版本 (如 Vector)
-                # 3. 基名版本的索引小于当前版本
                 if "_00" in name:
                     base_name = re.sub(r'_\d+$', '', name)
                     base_socket = next((bs for bs in collection if bs.identifier == base_name), None)
-                    
                     if base_socket:
-                        # 发现基名插槽存在。
-                        # 推断: AI 以为 Vector_001 是第一个，但其实 Vector 才是第一个。
-                        # 策略: 执行降维打击 (Shift Down)。
-                        # 尝试根据当前的数字后缀，寻找前一个插槽
                         if i > 0:
                             prev_s = collection[i-1]
-                            # 只有当前一个插槽看起来也是同类时才偏移
                             if base_name in prev_s.identifier:
                                 return prev_s
-                
                 return s
 
-        # 3. 名称匹配
         for s in collection:
             if s.name == name and s.bl_idname != 'NodeSocketVirtual': 
                 return s
         
-        # 4. 模糊后缀匹配
         if name and isinstance(name, str):
             clean_name = re.sub(r'_\d+$', '', name)
             for s in collection:
                 if s.name == clean_name or s.identifier == clean_name:
                     return s
 
-        # 5. 盲目索引
         if index is not None and 0 <= index < len(collection):
             s = collection[index]
             if s.bl_idname != 'NodeSocketVirtual': 
