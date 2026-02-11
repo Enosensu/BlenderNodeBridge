@@ -1,10 +1,11 @@
 # core/deserializer.py
-# GeoNeural Bridge v5.14.2
-# 修复: 连接恢复逻辑由 "名称优先" 改为 "索引优先"，解决 Vector Math 等节点同名插槽导致的连接错乱问题
-# 基础: v5.14.1
+# GeoNeural Bridge v5.14.9
+# 修复: 引入智能索引偏移 (Smart Shift)，解决 AI 使用 "Vector_001" 指代第一个插槽 (Blender实际为 "Vector") 导致的连接错位
+# 基础: v5.14.8
 
 import bpy
 import logging
+import re
 from mathutils import Vector, Euler, Matrix, Color, Quaternion
 
 try:
@@ -33,6 +34,8 @@ class NodeRestorer:
         if 'color' in data: node.color = data['color']
         
         props = data.get('properties', {})
+        if not isinstance(props, dict): return
+
         for prop_name, value in props.items():
             if prop_name in NodeRestorer.PROP_BLACKLIST: continue
             if isinstance(value, str) and value.startswith('<bpy_struct'): continue
@@ -59,7 +62,7 @@ class NodeRestorer:
 
     @staticmethod
     def _restore_color_ramp(node, prop_name, ramp_data):
-        if not hasattr(node, prop_name) or not ramp_data: return
+        if not hasattr(node, prop_name) or not isinstance(ramp_data, dict): return
         ramp = getattr(node, prop_name)
         try:
             if "color_mode" in ramp_data: ramp.color_mode = ramp_data["color_mode"]
@@ -68,18 +71,22 @@ class NodeRestorer:
             while len(ramp.elements) < len(elements): ramp.elements.new(1.0)
             while len(ramp.elements) > len(elements): ramp.elements.remove(ramp.elements[-1])
             for i, e_data in enumerate(elements):
+                if not isinstance(e_data, dict): continue
                 ramp.elements[i].position = e_data.get("pos", 0.0)
                 ramp.elements[i].color = e_data.get("color", (1,1,1,1))
         except: pass
 
     @staticmethod
     def restore_socket_defaults(node, inputs_data):
+        if not isinstance(inputs_data, list): return
+
         for s_data in inputs_data:
+            if not isinstance(s_data, dict): continue
+
             if s_data.get('identifier') == '__extend__' or \
                s_data.get('bl_socket_idname') == 'NodeSocketVirtual': 
                 continue
             
-            # 数值恢复也采用 ID 优先策略
             socket = None
             ident = s_data.get('identifier')
             
@@ -126,17 +133,24 @@ class DeserializationEngine:
         self.node_map = {} 
 
     def deserialize_tree(self, json_data, offset=(0,0)):
+        if not isinstance(json_data, dict): return []
+        
         nodes_data = json_data.get("nodes", [])
+        if not isinstance(nodes_data, list): nodes_data = []
+
         links_data = json_data.get("links", [])
         frames_data = json_data.get("frames", {})
 
         # Phase 1: 骨架
         ordered_nodes = self._sort_priority(nodes_data)
         for n_data in ordered_nodes:
-            self._create_node_skeleton(n_data, offset)
+            if isinstance(n_data, dict):
+                self._create_node_skeleton(n_data, offset)
 
         # Phase 2: 定义
         for n_data in nodes_data:
+            if not isinstance(n_data, dict): continue
+            
             node = self.node_map.get(n_data.get('name'))
             if not node: continue
             
@@ -154,19 +168,24 @@ class DeserializationEngine:
 
         # Phase 4: 数值
         for n_data in nodes_data:
+            if not isinstance(n_data, dict): continue
             node = self.node_map.get(n_data.get('name'))
             if not node: continue
-            if 'inputs' in n_data: NodeRestorer.restore_socket_defaults(node, n_data['inputs'])
-            if 'outputs' in n_data:
+            
+            if 'inputs' in n_data: 
+                NodeRestorer.restore_socket_defaults(node, n_data['inputs'])
+            
+            if 'outputs' in n_data and isinstance(n_data['outputs'], list):
                 for i, out in enumerate(n_data['outputs']):
-                    if i < len(node.outputs) and out.get('hide'): node.outputs[i].hide = True
+                    if isinstance(out, dict) and i < len(node.outputs) and out.get('hide'): 
+                        node.outputs[i].hide = True
 
         # Phase 5: 连接与父子
         self._restore_links(links_data)
         
-        final_frames = frames_data.copy()
+        final_frames = frames_data.copy() if isinstance(frames_data, dict) else {}
         for n_data in nodes_data:
-            if 'parent' in n_data and n_data['parent']:
+            if isinstance(n_data, dict) and 'parent' in n_data and n_data['parent']:
                 child_name = n_data.get('name')
                 parent_name = n_data.get('parent')
                 if child_name and parent_name and child_name not in final_frames:
@@ -180,6 +199,7 @@ class DeserializationEngine:
         zone_outputs = {'GeometryNodeSimulationOutput', 'GeometryNodeRepeatOutput', 'GeometryNodeBakeOutput'}
         outputs, normals, frames = [], [], []
         for n in nodes_data:
+            if not isinstance(n, dict): continue
             if n.get('bl_idname') in zone_outputs: outputs.append(n)
             elif n.get('bl_idname') == 'NodeFrame': frames.append(n)
             else: normals.append(n)
@@ -210,21 +230,26 @@ class DeserializationEngine:
         NodeRestorer.restore_props(node, n_data)
 
     def _restore_zone_items(self, node, state_data, collection_name):
-        if not hasattr(node, collection_name): return
+        if not hasattr(node, collection_name) or not isinstance(state_data, dict): return
         collection = getattr(node, collection_name)
         try: collection.clear()
         except: pass
 
         for item in state_data.get('items', []):
-            name = item.get('name', 'Value')
-            raw_type = item.get('socket_type', 'FLOAT')
-            bl_idname = item.get('bl_socket_idname')
+            if isinstance(item, str):
+                name = item
+                raw_type = 'FLOAT'
+                bl_idname = 'NodeSocketFloat'
+            elif isinstance(item, dict):
+                name = item.get('name', 'Value')
+                raw_type = item.get('socket_type', 'FLOAT')
+                bl_idname = item.get('bl_socket_idname')
+            else: continue
             
             if node_mappings:
                 if bl_idname: api_type = node_mappings.get_api_enum(bl_idname)
                 else: api_type = node_mappings.get_api_enum(raw_type)
-            else:
-                api_type = 'FLOAT'
+            else: api_type = 'FLOAT'
 
             if api_type == 'VIRTUAL': continue
             try: collection.new(api_type, name)
@@ -233,12 +258,18 @@ class DeserializationEngine:
                 except: pass
 
     def _restore_capture_items(self, node, items_data):
-        if not hasattr(node, 'capture_items'): return
+        if not hasattr(node, 'capture_items') or not isinstance(items_data, list): return
         try:
             node.capture_items.clear()
             for item in items_data:
-                name = item.get("name", "Value")
-                raw_type = item.get("data_type", "FLOAT")
+                if isinstance(item, str):
+                    name = item
+                    raw_type = 'FLOAT'
+                elif isinstance(item, dict):
+                    name = item.get("name", "Value")
+                    raw_type = item.get("data_type", "FLOAT")
+                else: continue
+
                 api_type = node_mappings.get_api_enum(raw_type) if node_mappings else raw_type
                 try: node.capture_items.new(api_type, name)
                 except: 
@@ -255,6 +286,7 @@ class DeserializationEngine:
         inputs = {}
         outputs = {}
         for n_data in nodes_data:
+            if not isinstance(n_data, dict): continue
             bl_idname = n_data.get('bl_idname')
             node = self.node_map.get(n_data.get('name'))
             if not node: continue
@@ -274,7 +306,9 @@ class DeserializationEngine:
                 except: pass
 
     def _restore_links(self, links_data):
+        if not isinstance(links_data, list): return
         for link in links_data:
+            if not isinstance(link, dict): continue
             src = self.node_map.get(link.get('from_node'))
             dst = self.node_map.get(link.get('to_node'))
             if src and dst:
@@ -286,24 +320,53 @@ class DeserializationEngine:
 
     def _find_socket(self, collection, name, index):
         """
-        [v5.14.2 Fix] 连接查找逻辑翻转: Index First (索引优先)
-        解决 Vector Math 等节点多个输入插槽同名导致的连接错误。
+        [v5.14.9 Fix] 智能偏移修正 (Smart Offset Shifting)
+        解决 AI 使用 "Vector_001" 指代第1个插槽 (Blender实际为 "Vector") 的问题。
         """
-        # 1. 优先尝试索引匹配
-        # 如果 JSON 里的索引在范围内，且名字也对得上，那绝对就是它了
+        # 1. 索引匹配
         if index is not None and 0 <= index < len(collection):
             s = collection[index]
-            if s.name == name and s.bl_idname != 'NodeSocketVirtual':
+            if s.name == name or s.identifier == name:
                 return s
         
-        # 2. 回退到名称匹配 (Name Fallback)
-        # 只有当索引对不上 (Blender版本变了导致插槽移位) 时才用这个
+        # 2. 标识符匹配 (带智能偏移检测)
+        for i, s in enumerate(collection):
+            if s.identifier == name:
+                # [核心逻辑] 如果找到了精确匹配 (如 Vector_001), 检查是否发生了 AI 的索引偏移
+                # 条件: 
+                # 1. 当前是带有数字后缀的名称
+                # 2. 集合中存在该名称的“基名”版本 (如 Vector)
+                # 3. 基名版本的索引小于当前版本
+                if "_00" in name:
+                    base_name = re.sub(r'_\d+$', '', name)
+                    base_socket = next((bs for bs in collection if bs.identifier == base_name), None)
+                    
+                    if base_socket:
+                        # 发现基名插槽存在。
+                        # 推断: AI 以为 Vector_001 是第一个，但其实 Vector 才是第一个。
+                        # 策略: 执行降维打击 (Shift Down)。
+                        # 尝试根据当前的数字后缀，寻找前一个插槽
+                        if i > 0:
+                            prev_s = collection[i-1]
+                            # 只有当前一个插槽看起来也是同类时才偏移
+                            if base_name in prev_s.identifier:
+                                return prev_s
+                
+                return s
+
+        # 3. 名称匹配
         for s in collection:
             if s.name == name and s.bl_idname != 'NodeSocketVirtual': 
                 return s
         
-        # 3. 最后的手段 (Blind Index)
-        # 名字对不上，但索引还在，死马当活马医
+        # 4. 模糊后缀匹配
+        if name and isinstance(name, str):
+            clean_name = re.sub(r'_\d+$', '', name)
+            for s in collection:
+                if s.name == clean_name or s.identifier == clean_name:
+                    return s
+
+        # 5. 盲目索引
         if index is not None and 0 <= index < len(collection):
             s = collection[index]
             if s.bl_idname != 'NodeSocketVirtual': 
@@ -312,6 +375,7 @@ class DeserializationEngine:
         return None
 
     def _restore_frames(self, frames_data):
+        if not isinstance(frames_data, dict): return
         for child_name, parent_name in frames_data.items():
             child = self.node_map.get(child_name)
             parent = self.node_map.get(parent_name)

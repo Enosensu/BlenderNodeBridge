@@ -1,17 +1,15 @@
 # __init__.py
-# GeoNeural Bridge v5.14.1 - Precision Update
-# 更新内容: 
-# 1. Serializer: 智能剔除 unavailable 插槽，解决 AI 上下文冗余问题
-# 2. Deserializer: 强制优先 Identifier 匹配，解决同名插槽数值错配问题
-# 基础: v5.14.0 (AI-Native Milestone)
+# GeoNeural Bridge v5.14.7 - UI Compact
+# 修复: 移除 Debug 面板上方多余的 separator，减少 UI 留白，使布局更紧凑
+# 基础: v5.14.6 (Twin Buttons)
 
 bl_info = {
-    "name": "GeoNeural Bridge (v5.14.1 Precision)",
+    "name": "GeoNeural Bridge (v5.14.7 UI)",
     "author": "Dev_Nodes_V5 & Dev_Analyst",
-    "version": (5, 14, 1),
+    "version": (5, 14, 7),
     "blender": (4, 0, 0),
     "location": "Node Editor > Sidebar > GeoNeural",
-    "description": "热修复：剔除冗余插槽数据，修复同名插槽数值注入错误。",
+    "description": "UI 紧凑版：优化面板间距，提升视觉连贯性。",
     "category": "Node",
 }
 
@@ -19,7 +17,7 @@ import bpy
 import importlib
 from .core import node_mappings
 
-# 导入子模块
+# 导入子模块 (Logic Layer)
 from .operators import clipboard
 
 modules_to_reload = [
@@ -31,7 +29,7 @@ for m in modules_to_reload:
     importlib.reload(m)
 
 # ==============================================================================
-# 1. UI 面板
+# 1. UI 面板 (Presentation Layer)
 # ==============================================================================
 
 class GN_PT_MainPanel(bpy.types.Panel):
@@ -46,51 +44,74 @@ class GN_PT_MainPanel(bpy.types.Panel):
         layout = self.layout
         scene = context.scene
 
+        # --- 顶部状态栏 ---
+        row = layout.row(align=True)
         try: 
             db_ok = node_mappings.load_db()
             if db_ok:
-                layout.label(text="AI 核心已就绪", icon='CHECKMARK')
+                row.label(text="AI Core: Ready", icon='CHECKMARK')
             else:
-                layout.label(text="映射库未加载", icon='INFO')
+                row.label(text="AI Core: Offline", icon='ERROR')
         except: 
-            layout.label(text="系统异常", icon='ERROR')
+            row.label(text="System Error", icon='CANCEL')
+        
+        # 调试开关 (右上角)
+        row.prop(scene, "gn_debug_mode", text="", icon='PREFERENCES')
 
         layout.separator()
 
+        # --- 核心操作区 (Twin Buttons Design) ---
         box = layout.box()
-        box.label(text="发送给 AI (复制):")
         
+        # 选项行
         row = box.row()
-        row.prop(scene, "gn_compact_mode", text="精简模式 (AI)")
-        
-        r = box.row()
-        r.operator("geonb.copy_nodes", text="复制选中节点", icon='COPYDOWN')
-
-        layout.separator()
-
-        col2 = layout.column(align=True)
-        col2.scale_y = 1.4
-        col2.operator("geonb.paste_nodes", text="智能粘贴 (Paste)", icon='PASTEDOWN')
+        row.prop(scene, "gn_compact_mode", text="精简模式 (AI Optimized)")
         
         layout.separator()
-        row = layout.row()
-        row.prop(scene, "gn_debug_mode", text="调试日志")
+        
+        # 使用 grid_flow 并排布局，并统一缩放
+        grid = box.grid_flow(row_major=True, columns=2, even_columns=True, even_rows=True, align=True)
+        
+        # 左侧：复制按钮
+        col_copy = grid.column(align=True)
+        col_copy.scale_y = 1.6  # 统一高度 (大按钮)
+        col_copy.operator("geonb.copy_nodes", text="复制 (Copy)", icon='COPYDOWN')
+        
+        # 右侧：粘贴按钮
+        col_paste = grid.column(align=True)
+        col_paste.scale_y = 1.6  # 统一高度 (大按钮)
+        col_paste.operator("geonb.paste_nodes", text="粘贴 (Paste)", icon='PASTEDOWN')
+
+        # --- 底部调试信息 (紧凑布局) ---
+        if scene.gn_debug_mode:
+            # [v5.14.7 修复] 移除了 layout.separator()，让两个 Box 紧挨着
+            info_box = layout.box()
+            info_box.label(text="Debug Info:", icon='INFO')
+            info_box.label(text=f"Addon: {bl_info['version']}")
+            info_box.label(text=f"Blender: {bpy.app.version_string}")
 
 # ==============================================================================
 # 2. 注册逻辑
 # ==============================================================================
 
 def register():
-    bpy.types.Scene.gn_debug_mode = bpy.props.BoolProperty(default=False)
+    # 注册场景属性 (Model State)
+    bpy.types.Scene.gn_debug_mode = bpy.props.BoolProperty(
+        name="Debug Mode",
+        description="Enable verbose logging for troubleshooting",
+        default=False
+    )
     bpy.types.Scene.gn_compact_mode = bpy.props.BoolProperty(
         name="Compact Mode",
-        description="去除 UI 数据以节省 Token，适合发送给 AI",
+        description="Strip UI data to save Tokens for AI context",
         default=True
     )
 
+    # 注册模块与面板
     clipboard.register()
     bpy.utils.register_class(GN_PT_MainPanel)
     
+    # 初始化 AI 映射库
     if hasattr(node_mappings, 'load_db'):
         node_mappings.load_db()
 

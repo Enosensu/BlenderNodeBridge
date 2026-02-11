@@ -1,7 +1,7 @@
 # operators/clipboard.py
-# GeoNeural Bridge v5.14.0 (AI-Native Milestone)
-# 修复: 完整移植 v5.13.28 的 DataUtils.robust_json_load 逻辑
-# 功能: 支持 Markdown 代码块、C风格注释、尾部逗号自动修复
+# GeoNeural Bridge v5.14.3
+# 修复: 增加智能解包功能 (Unwrap)，解决被 "root" 或 "data" 等键包裹的嵌套 JSON 无法读取的问题
+# 基础: v5.14.0 (AI-Native Milestone) / v5.13.39 (RobustLoader)
 
 import bpy
 import sys
@@ -41,18 +41,14 @@ def configure_logging(context):
     except: pass
 
 # ==============================================================================
-# 1. 强力数据清洗器 (移植自 v5.13.28 DataUtils)
+# 1. 强力数据加载器 (Robust Loader)
 # ==============================================================================
 
 class RobustLoader:
     @staticmethod
     def load_json(text):
         """
-        [Core Fix] 移植自 v5.13.28 的 robust_json_load
-        能够处理:
-        1. Markdown 代码块 (```json ... ```)
-        2. C 风格注释 (// 和 /* ... */)
-        3. JSON 尾部多余逗号
+        [Core] 处理 Markdown、C风格注释、尾部逗号等非标准 JSON 格式
         """
         if not text: return None
         
@@ -64,12 +60,10 @@ class RobustLoader:
                 text = match.group(1) if match.group(1) else match.group(2)
         
         # 2. 去除注释 (同时保留 URL 中的 //)
-        # 正则逻辑：匹配字符串 OR 匹配注释
         pattern = r'("[^"\\]*(?:\\.[^"\\]*)*")|(\/\/.*|\/\*[\s\S]*?\*\/)'
         text = re.sub(pattern, lambda m: m.group(1) if m.group(1) else "", text)
         
-        # 3. 修复尾部逗号 (Trailing Commas)
-        # 例如: { "a": 1, } -> { "a": 1 }
+        # 3. 修复尾部逗号
         text = re.sub(r',(\s*[}\]])', r'\1', text)
         
         try: 
@@ -77,6 +71,10 @@ class RobustLoader:
         except json.JSONDecodeError as e:
             logger.debug(f"JSON Parse Error: {e}")
             return None
+
+# ==============================================================================
+# 2. 数据清洗器 (AI 适配层)
+# ==============================================================================
 
 class DataSanitizer:
     @staticmethod
@@ -91,10 +89,36 @@ class DataSanitizer:
         return "NodeSocketFloat"
 
     @staticmethod
+    def _unwrap_payload(data):
+        """
+        [v5.14.3 新增] 智能解包：递归查找核心数据负载
+        解决 {"root": {...}} 或 {"data": {...}} 导致的结构不匹配问题
+        """
+        # 如果当前层级就是核心数据，直接返回
+        if 'nodes' in data or 'tree_type' in data:
+            return data
+        
+        # 尝试遍历第一层子项，寻找包含节点数据的字典
+        # 这可以处理 {"root": ...}, {"json": ...}, {"result": ...} 等各种包裹
+        for key, val in data.items():
+            if isinstance(val, dict):
+                if 'nodes' in val or 'tree_type' in val:
+                    logger.info(f"Unwrapped nested JSON from key: '{key}'")
+                    return val
+        
+        # 如果没找到，原样返回，交由后续逻辑处理（可能会失败）
+        return data
+
+    @staticmethod
     def sanitize(data):
         if not isinstance(data, dict): return data
+        
+        # [Step 0] 智能解包 (Handle Nested Structures)
+        data = DataSanitizer._unwrap_payload(data)
+
         if node_mappings: node_mappings.load_db()
 
+        # [Step 1] 标准化节点
         nodes = data.get('nodes', [])
         sanitized_nodes = []
         for n in nodes:
@@ -109,7 +133,7 @@ class DataSanitizer:
             if 'properties' not in n and 'params' in n:
                 n['properties'] = n['params']
             
-            # 输入映射
+            # 输入映射 (Dict -> List + 类型推断)
             if 'inputs' in n and isinstance(n['inputs'], dict):
                 new_inputs = []
                 for name, val in n['inputs'].items():
@@ -123,7 +147,7 @@ class DataSanitizer:
             sanitized_nodes.append(n)
         data['nodes'] = sanitized_nodes
 
-        # 连接映射
+        # [Step 2] 标准化连接
         links = data.get('links', [])
         sanitized_links = []
         for l in links:
@@ -134,10 +158,11 @@ class DataSanitizer:
             if 'dst_sock' in l: new_link['to_socket'] = l['dst_sock']
             sanitized_links.append(new_link)
         data['links'] = sanitized_links
+        
         return data
 
 # ==============================================================================
-# 2. 剪贴板管理器
+# 3. 剪贴板管理器
 # ==============================================================================
 
 class ClipboardManager:
@@ -153,15 +178,23 @@ class ClipboardManager:
 
     @staticmethod
     def get(context):
-        # 1. 优先解析系统剪贴板 (使用强力加载器)
+        # 1. 优先解析系统剪贴板
         try:
             sys_clip = context.window_manager.clipboard
             if sys_clip:
-                data = RobustLoader.load_json(sys_clip)
-                if data and isinstance(data, dict) and ('nodes' in data or 'tree_type' in data):
-                    logger.info("Detected AI JSON (Sanitized) -> Using System Clipboard")
-                    return DataSanitizer.sanitize(data)
-        except: pass
+                # 使用强力加载器解析文本
+                raw_data = RobustLoader.load_json(sys_clip)
+                
+                if isinstance(raw_data, dict):
+                    # [v5.14.3 修改] 先清洗/解包，再验证
+                    # 这样可以让 {"root": ...} 这样的数据在验证前被解包成标准格式
+                    sanitized_data = DataSanitizer.sanitize(raw_data)
+                    
+                    if sanitized_data and ('nodes' in sanitized_data or 'tree_type' in sanitized_data):
+                        logger.info("Detected AI JSON (Sanitized & Unwrapped) -> Using System Clipboard")
+                        return sanitized_data
+        except Exception as e:
+            logger.debug(f"Clipboard processing error: {e}")
 
         # 2. 回退到内部存储
         if ClipboardManager._internal_storage:
@@ -170,7 +203,7 @@ class ClipboardManager:
         return None
 
 # ==============================================================================
-# 3. 操作符定义
+# 4. 操作符定义
 # ==============================================================================
 
 class GEONB_OT_CopyNodes(Operator):
@@ -212,7 +245,7 @@ class GEONB_OT_PasteNodes(Operator):
         try:
             data = ClipboardManager.get(context)
             if not data or not data.get('nodes'):
-                self.report({'WARNING'}, "Clipboard empty"); return {'CANCELLED'}
+                self.report({'WARNING'}, "Clipboard empty or invalid format"); return {'CANCELLED'}
 
             bpy.ops.node.select_all(action='DESELECT')
             offset = self._calculate_smart_offset(context, data['nodes'])
