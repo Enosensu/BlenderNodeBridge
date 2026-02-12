@@ -1,8 +1,8 @@
 # core/deserializer.py
-# GeoNeural Bridge v5.14.10
-# 修复: 增强属性枚举值的模糊匹配能力
-# 解决: AI 输出 "EULER" 无法匹配 Blender "EULER_XYZ" 导致节点属性回退到默认值的问题
-# 基础: v5.14.9 (Smart Shift)
+# GeoNeural Bridge v5.14.14
+# 修复: 增加 "Capture Attribute" 节点的旧转新适配器
+# 解决: 当 Blender 版本将 Capture Attribute 升级为多项列表模式时，兼容 AI 生成的单项 data_type 指令
+# 基础: v5.14.13 (Socket Fuzzy Match)
 
 import bpy
 import logging
@@ -53,12 +53,10 @@ class NodeRestorer:
                     rna_prop = node.bl_rna.properties.get(prop_name)
                     if rna_prop and rna_prop.is_readonly: continue
                     
-                    # [v5.14.10 增强] 针对枚举类型的智能匹配
                     if rna_prop and rna_prop.type == 'ENUM':
                         if NodeRestorer._set_enum_property_smart(node, prop_name, value, rna_prop):
-                            continue # 设置成功，跳过默认逻辑
+                            continue 
 
-                    # 常规类型处理
                     current = getattr(node, prop_name)
                     if isinstance(current, (Vector, Color, Euler)) and isinstance(value, list):
                         setattr(node, prop_name, type(current)(value))
@@ -72,40 +70,24 @@ class NodeRestorer:
 
     @staticmethod
     def _set_enum_property_smart(node, prop_name, value, rna_prop):
-        """
-        [v5.14.10 新增] 智能设置枚举属性
-        处理 AI "EULER" -> Blender "EULER_XYZ" 的映射
-        """
         if not isinstance(value, str): return False
-        
-        # 获取所有合法选项
         valid_items = [item.identifier for item in rna_prop.enum_items]
         
-        # 1. 精确匹配 (最为优先)
         if value in valid_items:
-            setattr(node, prop_name, value)
-            return True
+            setattr(node, prop_name, value); return True
             
-        # 2. 归一化匹配 (忽略大小写)
         upper_val = value.upper()
         for item in valid_items:
             if item == upper_val:
-                setattr(node, prop_name, item)
-                return True
+                setattr(node, prop_name, item); return True
 
-        # 3. 前缀/包含匹配 (AI 常用简写)
-        # 例如: AI="EULER" -> Blender="EULER_XYZ"
-        # 优先匹配 "EULER_XYZ" (默认顺序) 而不是 "EULER_YXZ"
         for item in valid_items:
             if item.startswith(upper_val) or upper_val in item:
-                setattr(node, prop_name, item)
-                return True
+                setattr(node, prop_name, item); return True
         
-        # 4. 模糊匹配 (Difflib)
         matches = difflib.get_close_matches(upper_val, valid_items, n=1, cutoff=0.6)
         if matches:
-            setattr(node, prop_name, matches[0])
-            return True
+            setattr(node, prop_name, matches[0]); return True
             
         return False
 
@@ -203,14 +185,25 @@ class DeserializationEngine:
             node = self.node_map.get(n_data.get('name'))
             if not node: continue
             
+            # Zone 恢复
             for state_key, col_name in [('simulation_state', 'state_items'), 
                                       ('repeat_state', 'repeat_items'), 
                                       ('bake_state', 'bake_items')]:
                 if state_key in n_data:
                     self._restore_zone_items(node, n_data[state_key], col_name)
             
-            if 'capture_items_data' in n_data.get('properties', {}):
-                self._restore_capture_items(node, n_data['properties']['capture_items_data'])
+            # Foreach Zone 恢复
+            if 'foreach_main' in n_data or 'foreach_input' in n_data or 'foreach_generation' in n_data:
+                self._restore_foreach_stats(node, n_data)
+
+            # [v5.14.14 核心修复] 智能恢复 Capture Attribute
+            # 兼容逻辑: 优先使用 capture_items_data (新版)，如果不存在则回退尝试 data_type (旧版)
+            props = n_data.get('properties', {})
+            if 'capture_items_data' in props:
+                self._restore_capture_items(node, props['capture_items_data'])
+            elif 'data_type' in props and hasattr(node, 'capture_items'):
+                # 触发 Legacy-to-Modern 适配器
+                self._adapt_legacy_capture_node(node, props['data_type'])
 
         # Phase 3: 配对
         self._pair_zones(nodes_data)
@@ -245,7 +238,12 @@ class DeserializationEngine:
         return list(self.node_map.values())
 
     def _sort_priority(self, nodes_data):
-        zone_outputs = {'GeometryNodeSimulationOutput', 'GeometryNodeRepeatOutput', 'GeometryNodeBakeOutput'}
+        zone_outputs = {
+            'GeometryNodeSimulationOutput', 
+            'GeometryNodeRepeatOutput', 
+            'GeometryNodeBakeOutput',
+            'GeometryNodeForeachGeometryElementOutput'
+        }
         outputs, normals, frames = [], [], []
         for n in nodes_data:
             if not isinstance(n, dict): continue
@@ -278,47 +276,70 @@ class DeserializationEngine:
         if 'height' in n_data: node.height = n_data['height']
         NodeRestorer.restore_props(node, n_data)
 
+    def _restore_foreach_stats(self, node, n_data):
+        mappings = [('main_items', 'foreach_main'), ('input_items', 'foreach_input'), ('generation_items', 'foreach_generation')]
+        for col_name, json_key in mappings:
+            if not hasattr(node, col_name) or json_key not in n_data: continue
+            collection = getattr(node, col_name)
+            try: collection.clear()
+            except: pass
+            items_data = n_data[json_key].get('items', [])
+            for item in items_data:
+                name = item.get('name', 'Value')
+                raw_type = item.get('socket_type', 'FLOAT')
+                api_type = node_mappings.get_api_enum(raw_type) if node_mappings else 'FLOAT'
+                try: collection.new(api_type, name)
+                except: pass
+
     def _restore_zone_items(self, node, state_data, collection_name):
         if not hasattr(node, collection_name) or not isinstance(state_data, dict): return
         collection = getattr(node, collection_name)
         try: collection.clear()
         except: pass
-
         for item in state_data.get('items', []):
-            if isinstance(item, str):
-                name = item
-                raw_type = 'FLOAT'
-                bl_idname = 'NodeSocketFloat'
-            elif isinstance(item, dict):
-                name = item.get('name', 'Value')
-                raw_type = item.get('socket_type', 'FLOAT')
-                bl_idname = item.get('bl_socket_idname')
+            if isinstance(item, str): name = item; raw_type = 'FLOAT'
+            elif isinstance(item, dict): name = item.get('name', 'Value'); raw_type = item.get('socket_type', 'FLOAT')
             else: continue
-            
             if node_mappings:
-                if bl_idname: api_type = node_mappings.get_api_enum(bl_idname)
+                if 'bl_socket_idname' in item: api_type = node_mappings.get_api_enum(item['bl_socket_idname'])
                 else: api_type = node_mappings.get_api_enum(raw_type)
             else: api_type = 'FLOAT'
-
             if api_type == 'VIRTUAL': continue
             try: collection.new(api_type, name)
             except: 
                 try: collection.new('GEOMETRY', name)
                 except: pass
 
+    def _adapt_legacy_capture_node(self, node, data_type_str):
+        """[v5.14.14 新增] 适配器: 将旧版 'data_type' 属性转换为新版 capture_items 列表项"""
+        try:
+            node.capture_items.clear()
+            # 映射常见的 AI/旧版类型字符串到 API 枚举
+            # API Enum: 'FLOAT', 'INT', 'FLOAT_VECTOR', 'FLOAT_COLOR', 'BOOLEAN', 'ROTATION'
+            type_map = {
+                'VALUE': 'FLOAT', 'FLOAT': 'FLOAT',
+                'INT': 'INT', 'INTEGER': 'INT',
+                'VECTOR': 'FLOAT_VECTOR', 'FLOAT_VECTOR': 'FLOAT_VECTOR',
+                'COLOR': 'FLOAT_COLOR', 'RGBA': 'FLOAT_COLOR', 'FLOAT_COLOR': 'FLOAT_COLOR',
+                'BOOL': 'BOOLEAN', 'BOOLEAN': 'BOOLEAN',
+                'ROTATION': 'ROTATION'
+            }
+            api_type = type_map.get(data_type_str.upper(), 'FLOAT') # 默认 FLOAT
+            
+            # 创建新项，这会自动生成 "Value" 输入插槽和 "Attribute" 输出插槽
+            node.capture_items.new(api_type, "Value")
+            logger.info(f"Adapted legacy Capture Attribute to item: {api_type}")
+        except Exception as e:
+            logger.warning(f"Capture Adapter failed: {e}")
+
     def _restore_capture_items(self, node, items_data):
         if not hasattr(node, 'capture_items') or not isinstance(items_data, list): return
         try:
             node.capture_items.clear()
             for item in items_data:
-                if isinstance(item, str):
-                    name = item
-                    raw_type = 'FLOAT'
-                elif isinstance(item, dict):
-                    name = item.get("name", "Value")
-                    raw_type = item.get("data_type", "FLOAT")
+                if isinstance(item, str): name = item; raw_type = 'FLOAT'
+                elif isinstance(item, dict): name = item.get("name", "Value"); raw_type = item.get("data_type", "FLOAT")
                 else: continue
-
                 api_type = node_mappings.get_api_enum(raw_type) if node_mappings else raw_type
                 try: node.capture_items.new(api_type, name)
                 except: 
@@ -330,7 +351,8 @@ class DeserializationEngine:
         zone_types = {
             'GeometryNodeSimulationInput': 'GeometryNodeSimulationOutput',
             'GeometryNodeRepeatInput': 'GeometryNodeRepeatOutput',
-            'GeometryNodeBakeInput': 'GeometryNodeBakeOutput'
+            'GeometryNodeBakeInput': 'GeometryNodeBakeOutput',
+            'GeometryNodeForeachGeometryElementInput': 'GeometryNodeForeachGeometryElementOutput'
         }
         inputs = {}
         outputs = {}
@@ -385,21 +407,22 @@ class DeserializationEngine:
                                 return prev_s
                 return s
 
+        if name == "Value":
+            for s in collection:
+                if s.identifier.startswith("Value_"): return s
+
         for s in collection:
-            if s.name == name and s.bl_idname != 'NodeSocketVirtual': 
-                return s
+            if s.name == name and s.bl_idname != 'NodeSocketVirtual': return s
         
         if name and isinstance(name, str):
             clean_name = re.sub(r'_\d+$', '', name)
             for s in collection:
-                if s.name == clean_name or s.identifier == clean_name:
-                    return s
+                if s.name.lower() == clean_name.lower() and s.bl_idname != 'NodeSocketVirtual': return s
 
         if index is not None and 0 <= index < len(collection):
             s = collection[index]
             if s.bl_idname != 'NodeSocketVirtual': 
                 return s
-                
         return None
 
     def _restore_frames(self, frames_data):

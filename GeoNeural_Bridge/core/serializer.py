@@ -1,7 +1,7 @@
 # core/serializer.py
-# GeoNeural Bridge v5.14.1
-# 修复: 智能剔除 unavailable (无效/隐藏) 的插槽，大幅减少 AI 上下文噪音
-# 基础: v5.14.0 (AI-Native Milestone)
+# GeoNeural Bridge v5.14.12
+# 修复: 增加对 "For Each Geometry Element" 区域内部列表 (Main/Input/Generation) 的序列化支持
+# 基础: v5.14.1
 
 import bpy
 import logging
@@ -55,7 +55,8 @@ class CompactFilter:
         'select', 'hide', 'bl_icon',
         'bl_width_default', 'bl_width_min', 'bl_width_max',
         'bl_height_default', 'bl_height_min', 'bl_height_max',
-        'active_index', 'active_item', 'inspection_index', 'warning_propagation',
+        'active_index', 'active_item', 'active_input_index', 'active_generation_index', 'active_main_index',
+        'inspection_index', 'warning_propagation',
         'bl_description'
     }
     SOCKET_PROP_BLACKLIST = {
@@ -75,7 +76,8 @@ class CompactFilter:
             if direction in node_data:
                 for socket in node_data[direction]:
                     CompactFilter._process_socket(socket)
-        for state_key in ['simulation_state', 'repeat_state', 'bake_state']:
+        # 清理 Zone 列表颜色
+        for state_key in ['simulation_state', 'repeat_state', 'bake_state', 'foreach_main', 'foreach_input', 'foreach_generation']:
             if state_key in node_data:
                 for item in node_data[state_key].get('items', []):
                     if 'color' in item: del item['color']
@@ -157,9 +159,6 @@ class NodeSerializer:
         
         if node.parent: data['parent'] = node.parent.name
 
-        # [核心修复 v5.14.1] 
-        # 使用 socket.is_unavailable 过滤掉当前节点模式下隐藏/无效的插槽
-        # 这将消除 JSON 中的大量冗余信息 (如 "A_INT", "A_COL" 等)
         valid_inputs = []
         for i, s in enumerate(node.inputs):
             if hasattr(s, "is_unavailable") and s.is_unavailable: continue
@@ -174,16 +173,51 @@ class NodeSerializer:
 
         data['properties'] = NodeSerializer._serialize_properties(node)
 
+        # Zone States
         if node.bl_idname in ('GeometryNodeSimulationInput', 'GeometryNodeSimulationOutput'):
             data['simulation_state'] = NodeSerializer._serialize_zone_state(node, 'state_items')
         elif node.bl_idname in ('GeometryNodeRepeatInput', 'GeometryNodeRepeatOutput'):
             data['repeat_state'] = NodeSerializer._serialize_zone_state(node, 'repeat_items')
         elif node.bl_idname in ('GeometryNodeBakeInput', 'GeometryNodeBakeOutput'):
             data['bake_state'] = NodeSerializer._serialize_zone_state(node, 'bake_items')
+        
+        # [v5.14.12 新增] Foreach Zone 专属序列化
+        elif node.bl_idname in ('GeometryNodeForeachGeometryElementInput', 'GeometryNodeForeachGeometryElementOutput'):
+            NodeSerializer._serialize_foreach_stats(node, data)
 
         if node.bl_idname == 'GeometryNodeGroup' and node.node_tree:
             data['node_tree_name'] = node.node_tree.name
 
+        return data
+
+    @staticmethod
+    def _serialize_foreach_stats(node, data):
+        """序列化 For Each 节点的三个核心列表"""
+        # 1. Main Items (存在于 Input 和 Output)
+        if hasattr(node, 'main_items'):
+            data['foreach_main'] = NodeSerializer._serialize_item_collection(node.main_items)
+        
+        # 2. Input Items (仅存在于 Input)
+        if hasattr(node, 'input_items'):
+            data['foreach_input'] = NodeSerializer._serialize_item_collection(node.input_items)
+            
+        # 3. Generation Items (仅存在于 Output)
+        if hasattr(node, 'generation_items'):
+            data['foreach_generation'] = NodeSerializer._serialize_item_collection(node.generation_items)
+
+    @staticmethod
+    def _serialize_item_collection(collection):
+        """通用集合序列化"""
+        data = {'items': []}
+        for item in collection:
+            s_type = getattr(item, 'socket_type', 'FLOAT')
+            item_data = {
+                'name': item.name,
+                'socket_type': str(s_type),
+                'bl_socket_idname': node_mappings.get_socket_class_name(s_type) if node_mappings else 'NodeSocketFloat',
+            }
+            if hasattr(item, 'color'): item_data['color'] = list(item.color)
+            data['items'].append(item_data)
         return data
 
     @staticmethod
@@ -256,7 +290,7 @@ class SerializationEngine:
                     self.connected_sockets.add((link.to_node.name, link.to_socket.identifier))
 
         data = {
-            "version": "v5.14.1 Strict",
+            "version": "v5.14.12 Strict",
             "tree_type": self.tree.bl_idname,
             "nodes": [],
             "links": links_data,
