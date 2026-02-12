@@ -118,20 +118,3 @@
 }
 
 ```
-
-```
-
-### 💡 关键改进说明 (基于 v5.14.10)
-
-1.  **Inputs 字典化 (`dict`)**：
-    * **旧**: `"inputs": [{"name": "Val", "type": "FLOAT", "default_value": 0.5}, ...]`
-    * **新**: `"inputs": {"Val": 0.5}`
-    * **优势**: 极大减少 Token 消耗，且 v5.14.3 的 `DataSanitizer` 支持自动类型推断。
-
-2.  **属性模糊匹配**：
-    * 提示词不再强制要求 AI 背诵 Blender 复杂的内部枚举 (如 `EULER_XYZ`)，允许使用通用术语 (如 `EULER`)，依靠 v5.14.10 的 `Enum Fuzzy Match` 自动修正。
-
-3.  **连接直觉化**：
-    * 提示词引导 AI 关注 UI 名称而非索引，依靠 v5.14.9 的 `Smart Shift` 逻辑来解决同名插槽 (如 Vector Math) 的连接问题。
-
-```
