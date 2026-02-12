@@ -1,7 +1,8 @@
 # core/serializer.py
-# GeoNeural Bridge v5.14.12
-# 修复: 增加对 "For Each Geometry Element" 区域内部列表 (Main/Input/Generation) 的序列化支持
-# 基础: v5.14.1
+# GeoNeural Bridge v5.14.45
+# 修复: 强制双向互补 Zone 节点 (Bidirectional Integrity)
+# 逻辑: 无论选中 Input 还是 Output，强制将另一半加入导出列表
+# 目的: 确保 JSON 中永远包含完整的 Zone 拓扑，从源头防止崩溃
 
 import bpy
 import logging
@@ -181,7 +182,7 @@ class NodeSerializer:
         elif node.bl_idname in ('GeometryNodeBakeInput', 'GeometryNodeBakeOutput'):
             data['bake_state'] = NodeSerializer._serialize_zone_state(node, 'bake_items')
         
-        # [v5.14.12 新增] Foreach Zone 专属序列化
+        # Foreach Zone
         elif node.bl_idname in ('GeometryNodeForeachGeometryElementInput', 'GeometryNodeForeachGeometryElementOutput'):
             NodeSerializer._serialize_foreach_stats(node, data)
 
@@ -193,21 +194,15 @@ class NodeSerializer:
     @staticmethod
     def _serialize_foreach_stats(node, data):
         """序列化 For Each 节点的三个核心列表"""
-        # 1. Main Items (存在于 Input 和 Output)
         if hasattr(node, 'main_items'):
             data['foreach_main'] = NodeSerializer._serialize_item_collection(node.main_items)
-        
-        # 2. Input Items (仅存在于 Input)
         if hasattr(node, 'input_items'):
             data['foreach_input'] = NodeSerializer._serialize_item_collection(node.input_items)
-            
-        # 3. Generation Items (仅存在于 Output)
         if hasattr(node, 'generation_items'):
             data['foreach_generation'] = NodeSerializer._serialize_item_collection(node.generation_items)
 
     @staticmethod
     def _serialize_item_collection(collection):
-        """通用集合序列化"""
         data = {'items': []}
         for item in collection:
             s_type = getattr(item, 'socket_type', 'FLOAT')
@@ -269,11 +264,53 @@ class SerializationEngine:
         self.context = context
         self.selected_only = selected_only
         self.compact = compact
-        self.nodes_to_process = [n for n in tree.nodes if n.select] if selected_only else list(tree.nodes)
+        
+        # 1. 获取初始选区
+        initial_nodes = [n for n in tree.nodes if n.select] if selected_only else list(tree.nodes)
+        
+        # 2. [v5.14.45] 强制双向互补：确保 Zone 节点成对出现
+        self.nodes_to_process = self._ensure_zone_integrity(initial_nodes)
+        
         self.connected_sockets = set()
+
+    def _ensure_zone_integrity(self, nodes):
+        """
+        核心逻辑：扫描选中节点，如果发现是 Zone 的一部分（Input 或 Output），
+        强制将其配对的另一半加入列表。
+        """
+        final_set = set(nodes)
+        # 使用 pointer 进行唯一性检查
+        processed_ids = {n.as_pointer() for n in nodes}
+
+        # 构建反向查找表: { Output_Node: Input_Node }
+        # 遍历全树寻找所有的 Input 节点，并记录它们指向的 Output
+        output_to_input_map = {}
+        for n in self.tree.nodes:
+            if hasattr(n, "paired_output") and n.paired_output:
+                output_to_input_map[n.paired_output] = n
+
+        for node in list(final_set):
+            partner = None
+
+            # Case A: 当前节点是 Input (有 paired_output 属性)
+            if hasattr(node, "paired_output") and node.paired_output:
+                partner = node.paired_output
+
+            # Case B: 当前节点是 Output (在反向查找表中)
+            elif node in output_to_input_map:
+                partner = output_to_input_map[node]
+
+            # 如果找到了配对伙伴，且伙伴不在选区中，则强制添加
+            if partner and partner.as_pointer() not in processed_ids:
+                final_set.add(partner)
+                processed_ids.add(partner.as_pointer())
+                logger.info(f"Auto-included zone partner: {partner.name} for {node.name}")
+
+        return list(final_set)
 
     def execute(self):
         node_names = {n.name for n in self.nodes_to_process}
+        
         links_data = []
         for link in self.tree.links:
             if link.from_node.name in node_names and link.to_node.name in node_names:
@@ -290,7 +327,7 @@ class SerializationEngine:
                     self.connected_sockets.add((link.to_node.name, link.to_socket.identifier))
 
         data = {
-            "version": "v5.14.12 Strict",
+            "version": "v5.14.45 Strict-Integrity",
             "tree_type": self.tree.bl_idname,
             "nodes": [],
             "links": links_data,

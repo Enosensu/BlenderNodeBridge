@@ -1,8 +1,7 @@
 # core/deserializer.py
-# GeoNeural Bridge v5.14.14
-# 修复: 增加 "Capture Attribute" 节点的旧转新适配器
-# 解决: 当 Blender 版本将 Capture Attribute 升级为多项列表模式时，兼容 AI 生成的单项 data_type 指令
-# 基础: v5.14.13 (Socket Fuzzy Match)
+# GeoNeural Bridge v5.14.46
+# 修复: Auto-Healing 现在会从参考节点同步 Zone 定义数据，确保补全的节点拥有正确的插槽
+# 基础: v5.14.45
 
 import bpy
 import logging
@@ -25,7 +24,8 @@ class NodeRestorer:
     PROP_BLACKLIST = {
         'active_item', 'active_index', 'inspection_index', 'is_active_output', 
         'interface', 'node_tree', 'color_ramp', 'warning_propagation',
-        'bl_idname', 'bl_label', 'bl_description', 'bl_icon', 'location', 'width', 'height'
+        'bl_idname', 'bl_label', 'bl_description', 'bl_icon', 'location', 'width', 'height',
+        'active_input_index', 'active_main_index', 'active_generation_index'
     }
 
     @staticmethod
@@ -178,37 +178,45 @@ class DeserializationEngine:
             if isinstance(n_data, dict):
                 self._create_node_skeleton(n_data, offset)
 
-        # Phase 2: 定义
+        # [v5.14.46] Phase 1.5: 自动愈合 (Auto-Healing)
+        # 检测孤儿 Zone 节点，补全配对节点，并同步数据
+        self._heal_topology(offset)
+
+        # Phase 2: 定义 (仅基础属性)
         for n_data in nodes_data:
             if not isinstance(n_data, dict): continue
             
             node = self.node_map.get(n_data.get('name'))
             if not node: continue
             
-            # Zone 恢复
+            props = n_data.get('properties', {})
+            if 'capture_items_data' in props:
+                self._restore_capture_items(node, props['capture_items_data'])
+            elif 'data_type' in props and hasattr(node, 'capture_items'):
+                self._adapt_legacy_capture_node(node, props['data_type'])
+
+        if hasattr(self.tree, "update_tag"):
+            self.tree.update_tag()
+
+        # Phase 3: 配对 (Pairing)
+        self._pair_zones(nodes_data)
+
+        # Phase 4: 内容恢复 (Content Restoration)
+        for n_data in nodes_data:
+            if not isinstance(n_data, dict): continue
+            node = self.node_map.get(n_data.get('name'))
+            if not node: continue
+
             for state_key, col_name in [('simulation_state', 'state_items'), 
                                       ('repeat_state', 'repeat_items'), 
                                       ('bake_state', 'bake_items')]:
                 if state_key in n_data:
                     self._restore_zone_items(node, n_data[state_key], col_name)
             
-            # Foreach Zone 恢复
             if 'foreach_main' in n_data or 'foreach_input' in n_data or 'foreach_generation' in n_data:
                 self._restore_foreach_stats(node, n_data)
 
-            # [v5.14.14 核心修复] 智能恢复 Capture Attribute
-            # 兼容逻辑: 优先使用 capture_items_data (新版)，如果不存在则回退尝试 data_type (旧版)
-            props = n_data.get('properties', {})
-            if 'capture_items_data' in props:
-                self._restore_capture_items(node, props['capture_items_data'])
-            elif 'data_type' in props and hasattr(node, 'capture_items'):
-                # 触发 Legacy-to-Modern 适配器
-                self._adapt_legacy_capture_node(node, props['data_type'])
-
-        # Phase 3: 配对
-        self._pair_zones(nodes_data)
-
-        # Phase 4: 数值
+        # Phase 5: 数值
         for n_data in nodes_data:
             if not isinstance(n_data, dict): continue
             node = self.node_map.get(n_data.get('name'))
@@ -222,7 +230,7 @@ class DeserializationEngine:
                     if isinstance(out, dict) and i < len(node.outputs) and out.get('hide'): 
                         node.outputs[i].hide = True
 
-        # Phase 5: 连接与父子
+        # Phase 6: 连接与父子
         self._restore_links(links_data)
         
         final_frames = frames_data.copy() if isinstance(frames_data, dict) else {}
@@ -236,6 +244,98 @@ class DeserializationEngine:
 
         for node in self.node_map.values(): node.select = True
         return list(self.node_map.values())
+
+    def _heal_topology(self, offset):
+        """
+        [Auto-Healing]
+        如果发现当前的节点图中，Zone Input 和 Output 数量不匹配（孤儿），
+        自动在内存中创建缺失的节点，并立即从现存的配对节点复制数据。
+        """
+        zone_pairs = {
+            'GeometryNodeForeachGeometryElementInput': 'GeometryNodeForeachGeometryElementOutput',
+            'GeometryNodeSimulationInput': 'GeometryNodeSimulationOutput',
+            'GeometryNodeRepeatInput': 'GeometryNodeRepeatOutput',
+            'GeometryNodeBakeInput': 'GeometryNodeBakeOutput'
+        }
+        
+        present_types = {}
+        for node in self.node_map.values():
+            if node.bl_idname not in present_types:
+                present_types[node.bl_idname] = []
+            present_types[node.bl_idname].append(node)
+            
+        for in_type, out_type in zone_pairs.items():
+            inputs = present_types.get(in_type, [])
+            outputs = present_types.get(out_type, [])
+            
+            # Case 1: 缺 Output
+            if len(inputs) > len(outputs):
+                diff = len(inputs) - len(outputs)
+                logger.info(f"[Auto-Heal] Creating {diff} missing {out_type}")
+                for i in range(diff):
+                    ghost = self._create_ghost_node(out_type, inputs[i].location, offset, "Auto_Output")
+                    # [Sync] 从 Input 同步数据到 Ghost Output
+                    self._sync_ghost_node_data(ghost, inputs[i])
+
+            # Case 2: 缺 Input (常见崩溃源)
+            elif len(outputs) > len(inputs):
+                diff = len(outputs) - len(inputs)
+                logger.info(f"[Auto-Heal] Creating {diff} missing {in_type}")
+                for i in range(diff):
+                    ghost = self._create_ghost_node(in_type, outputs[i].location, offset, "Auto_Input")
+                    # [Sync] 从 Output 同步数据到 Ghost Input
+                    self._sync_ghost_node_data(ghost, outputs[i])
+
+    def _create_ghost_node(self, bl_idname, ref_location, offset, suffix):
+        """创建一个补全节点并注册到 node_map"""
+        try:
+            node = self.tree.nodes.new(bl_idname)
+            shift = Vector((300, 0)) if "Output" in bl_idname else Vector((-300, 0))
+            node.location = ref_location + shift
+            unique_name = f"{bl_idname}_{suffix}_{len(self.node_map)}"
+            self.node_map[unique_name] = node
+            node.label = "(Auto Created)"
+            node.use_custom_color = True
+            node.color = (0.3, 0.3, 0.3)
+            return node
+        except Exception as e:
+            logger.error(f"Failed to create ghost node {bl_idname}: {e}")
+            return None
+
+    def _sync_ghost_node_data(self, ghost_node, ref_node):
+        """
+        [v5.14.46 New] 幽灵节点数据同步
+        从参考节点(ref_node)复制所有 Zone 定义列表到新创建的节点(ghost_node)。
+        这是为了确保补全的节点不仅仅是个空壳，而是拥有匹配的插槽。
+        """
+        if not ghost_node or not ref_node: return
+
+        # 1. Foreach Zone Lists
+        for col_name in ['main_items', 'input_items', 'generation_items']:
+            if hasattr(ref_node, col_name) and hasattr(ghost_node, col_name):
+                src_col = getattr(ref_node, col_name)
+                dst_col = getattr(ghost_node, col_name)
+                dst_col.clear()
+                for item in src_col:
+                    s_type = getattr(item, 'socket_type', 'FLOAT')
+                    try: 
+                        new_item = dst_col.new(s_type, item.name)
+                        # Sync colors if applicable
+                        if hasattr(item, 'color') and hasattr(new_item, 'color'):
+                            new_item.color = item.color
+                    except: pass
+        
+        # 2. General Zone Lists (Simulation/Repeat/Bake)
+        # 注意: 不同的 Zone 类型，列表名可能不同，这里尝试通用的 state_items 等
+        for col_name in ['state_items', 'repeat_items', 'bake_items']:
+            if hasattr(ref_node, col_name) and hasattr(ghost_node, col_name):
+                src_col = getattr(ref_node, col_name)
+                dst_col = getattr(ghost_node, col_name)
+                dst_col.clear()
+                for item in src_col:
+                    s_type = getattr(item, 'socket_type', 'FLOAT')
+                    try: dst_col.new(s_type, item.name)
+                    except: pass
 
     def _sort_priority(self, nodes_data):
         zone_outputs = {
@@ -311,11 +411,8 @@ class DeserializationEngine:
                 except: pass
 
     def _adapt_legacy_capture_node(self, node, data_type_str):
-        """[v5.14.14 新增] 适配器: 将旧版 'data_type' 属性转换为新版 capture_items 列表项"""
         try:
             node.capture_items.clear()
-            # 映射常见的 AI/旧版类型字符串到 API 枚举
-            # API Enum: 'FLOAT', 'INT', 'FLOAT_VECTOR', 'FLOAT_COLOR', 'BOOLEAN', 'ROTATION'
             type_map = {
                 'VALUE': 'FLOAT', 'FLOAT': 'FLOAT',
                 'INT': 'INT', 'INTEGER': 'INT',
@@ -324,13 +421,9 @@ class DeserializationEngine:
                 'BOOL': 'BOOLEAN', 'BOOLEAN': 'BOOLEAN',
                 'ROTATION': 'ROTATION'
             }
-            api_type = type_map.get(data_type_str.upper(), 'FLOAT') # 默认 FLOAT
-            
-            # 创建新项，这会自动生成 "Value" 输入插槽和 "Attribute" 输出插槽
+            api_type = type_map.get(data_type_str.upper(), 'FLOAT')
             node.capture_items.new(api_type, "Value")
-            logger.info(f"Adapted legacy Capture Attribute to item: {api_type}")
-        except Exception as e:
-            logger.warning(f"Capture Adapter failed: {e}")
+        except: pass
 
     def _restore_capture_items(self, node, items_data):
         if not hasattr(node, 'capture_items') or not isinstance(items_data, list): return
@@ -354,13 +447,13 @@ class DeserializationEngine:
             'GeometryNodeBakeInput': 'GeometryNodeBakeOutput',
             'GeometryNodeForeachGeometryElementInput': 'GeometryNodeForeachGeometryElementOutput'
         }
+        
+        current_nodes = list(self.node_map.values())
         inputs = {}
         outputs = {}
-        for n_data in nodes_data:
-            if not isinstance(n_data, dict): continue
-            bl_idname = n_data.get('bl_idname')
-            node = self.node_map.get(n_data.get('name'))
-            if not node: continue
+        
+        for node in current_nodes:
+            bl_idname = node.bl_idname
             if bl_idname in zone_types:
                 inputs.setdefault(bl_idname, []).append(node)
             elif bl_idname in zone_types.values():
@@ -371,9 +464,11 @@ class DeserializationEngine:
             out_nodes = outputs.get(out_type, [])
             count = min(len(in_nodes), len(out_nodes))
             for i in range(count):
+                input_node = in_nodes[i]
+                output_node = out_nodes[i]
                 try:
-                    if hasattr(in_nodes[i], 'pair_with_output'):
-                        in_nodes[i].pair_with_output(out_nodes[i])
+                    if hasattr(input_node, 'pair_with_output'):
+                        input_node.pair_with_output(output_node)
                 except: pass
 
     def _restore_links(self, links_data):
@@ -418,6 +513,26 @@ class DeserializationEngine:
             clean_name = re.sub(r'_\d+$', '', name)
             for s in collection:
                 if s.name.lower() == clean_name.lower() and s.bl_idname != 'NodeSocketVirtual': return s
+
+        type_keywords = {
+            "GEOMETRY": "NodeSocketGeometry",
+            "VECTOR": "NodeSocketVector",
+            "SHADER": "NodeSocketShader",
+            "COLOR": "NodeSocketColor",
+            "IMAGE": "NodeSocketImage",
+            "OBJECT": "NodeSocketObject",
+            "COLLECTION": "NodeSocketCollection",
+            "MATERIAL": "NodeSocketMaterial",
+            "STRING": "NodeSocketString",
+            "ROTATION": "NodeSocketRotation",
+            "MATRIX": "NodeSocketMatrix"
+        }
+        
+        if name and name.upper() in type_keywords:
+            target_bl_idname = type_keywords[name.upper()]
+            for s in collection:
+                if s.bl_idname == target_bl_idname and not s.hide and s.enabled:
+                    return s
 
         if index is not None and 0 <= index < len(collection):
             s = collection[index]

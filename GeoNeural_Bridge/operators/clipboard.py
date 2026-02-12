@@ -1,7 +1,7 @@
 # operators/clipboard.py
-# GeoNeural Bridge v5.14.3
-# 修复: 增加智能解包功能 (Unwrap)，解决被 "root" 或 "data" 等键包裹的嵌套 JSON 无法读取的问题
-# 基础: v5.14.0 (AI-Native Milestone) / v5.13.39 (RobustLoader)
+# GeoNeural Bridge v5.14.46
+# 修复: 增强 RobustLoader 以处理非断行空格(\xa0)导致的 JSON 解析失败
+# 基础: v5.14.3
 
 import bpy
 import sys
@@ -48,9 +48,13 @@ class RobustLoader:
     @staticmethod
     def load_json(text):
         """
-        [Core] 处理 Markdown、C风格注释、尾部逗号等非标准 JSON 格式
+        [Core] 处理 Markdown、C风格注释、尾部逗号、非标准空格等脏数据
         """
         if not text: return None
+        
+        # [v5.14.46 Fix] 预处理：清洗非断行空格(NBSP)和其他潜在的各种空白符
+        # 这解决了从聊天窗口/网页复制 JSON 时因缩进字符不对导致的解析错误
+        text = text.replace(u'\xa0', ' ')
         
         # 1. 去除 Markdown 包裹
         if "```" in text:
@@ -91,29 +95,22 @@ class DataSanitizer:
     @staticmethod
     def _unwrap_payload(data):
         """
-        [v5.14.3 新增] 智能解包：递归查找核心数据负载
-        解决 {"root": {...}} 或 {"data": {...}} 导致的结构不匹配问题
+        智能解包：递归查找核心数据负载
         """
-        # 如果当前层级就是核心数据，直接返回
         if 'nodes' in data or 'tree_type' in data:
             return data
         
-        # 尝试遍历第一层子项，寻找包含节点数据的字典
-        # 这可以处理 {"root": ...}, {"json": ...}, {"result": ...} 等各种包裹
         for key, val in data.items():
             if isinstance(val, dict):
                 if 'nodes' in val or 'tree_type' in val:
                     logger.info(f"Unwrapped nested JSON from key: '{key}'")
                     return val
-        
-        # 如果没找到，原样返回，交由后续逻辑处理（可能会失败）
         return data
 
     @staticmethod
     def sanitize(data):
         if not isinstance(data, dict): return data
         
-        # [Step 0] 智能解包 (Handle Nested Structures)
         data = DataSanitizer._unwrap_payload(data)
 
         if node_mappings: node_mappings.load_db()
@@ -182,12 +179,10 @@ class ClipboardManager:
         try:
             sys_clip = context.window_manager.clipboard
             if sys_clip:
-                # 使用强力加载器解析文本
+                # 使用强力加载器解析文本 (含 NBSP 清洗)
                 raw_data = RobustLoader.load_json(sys_clip)
                 
                 if isinstance(raw_data, dict):
-                    # [v5.14.3 修改] 先清洗/解包，再验证
-                    # 这样可以让 {"root": ...} 这样的数据在验证前被解包成标准格式
                     sanitized_data = DataSanitizer.sanitize(raw_data)
                     
                     if sanitized_data and ('nodes' in sanitized_data or 'tree_type' in sanitized_data):
