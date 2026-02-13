@@ -1,8 +1,9 @@
 # core/serializer.py
-# GeoNeural Bridge v5.14.45
-# 修复: 强制双向互补 Zone 节点 (Bidirectional Integrity)
-# 逻辑: 无论选中 Input 还是 Output，强制将另一半加入导出列表
-# 目的: 确保 JSON 中永远包含完整的 Zone 拓扑，从源头防止崩溃
+# GeoNeural Bridge v5.14.54
+# 修复: 
+# 1. Compact 模式下强制保留 NodeFrame (语义锚点)
+# 2. Socket default_value 读取增加 Try-Except 防护 (防止 Geometry Socket 崩溃)
+# 基础: v5.14.45
 
 import bpy
 import logging
@@ -66,8 +67,14 @@ class CompactFilter:
 
     @staticmethod
     def process_node(node_data):
+        # [v5.14.54] 保留 NodeFrame 的 label 用于语义理解，哪怕在 Compact 模式
+        is_frame = node_data.get('bl_idname') == 'NodeFrame'
+        
         for key in list(node_data.keys()):
+            # 特殊豁免: Frame 的 label 是语义关键
+            if is_frame and key == 'label': continue
             if key in CompactFilter.NODE_PROP_BLACKLIST: del node_data[key]
+            
         if 'properties' in node_data:
             props = node_data['properties']
             for key in list(props.keys()):
@@ -115,9 +122,15 @@ class SocketSerializer:
             'hide_value': getattr(socket, 'hide_value', False),
             'label': getattr(socket, 'label', ''),
         }
+        
+        # [v5.14.54] Safety Guard: 即使 hasattr 为真，读取 default_value 也可能崩溃
         if hasattr(socket, 'default_value'):
-            val = DataCleaner.clean_data(socket.default_value)
-            if val is not None: data['default_value'] = val
+            try:
+                val = DataCleaner.clean_data(socket.default_value)
+                if val is not None: data['default_value'] = val
+            except Exception:
+                # 某些 socket (如 NodeSocketGeometry) 访问 default_value 会抛错，忽略即可
+                pass
         
         if bl_idname == 'NodeSocketBundle' or data['type'] == 'BUNDLE':
             data['is_bundle'] = True
@@ -327,7 +340,7 @@ class SerializationEngine:
                     self.connected_sockets.add((link.to_node.name, link.to_socket.identifier))
 
         data = {
-            "version": "v5.14.45 Strict-Integrity",
+            "version": "v5.14.54 Semantic-Frame",
             "tree_type": self.tree.bl_idname,
             "nodes": [],
             "links": links_data,
@@ -335,12 +348,15 @@ class SerializationEngine:
         }
 
         for node in self.nodes_to_process:
-            if self.compact and node.bl_idname == 'NodeFrame': continue
+            # [v5.14.54] Compact 模式下不再跳过 Frame，因为 AI 需要语义分组
+            # 原代码: if self.compact and node.bl_idname == 'NodeFrame': continue
+            
             try:
                 node_data = NodeSerializer.serialize(node)
                 if self.compact:
                     node_data = CompactFilter.process_node(node_data)
-                    if 'inputs' in node_data:
+                    # 只有非 Frame 节点才需要清理未连接的 Input
+                    if node.bl_idname != 'NodeFrame' and 'inputs' in node_data:
                         for inp in node_data['inputs']:
                             if (node.name, inp['identifier']) in self.connected_sockets:
                                 if 'default_value' in inp: del inp['default_value']
@@ -348,10 +364,11 @@ class SerializationEngine:
             except Exception as e:
                 logger.error(f"Serialize error {node.name}: {e}")
 
-        if not self.compact:
-            for node in self.nodes_to_process:
-                if node.parent and node.parent.name in node_names:
-                    data["frames"][node.name] = node.parent.name
+        # Frame parent 关系处理
+        # 即使在 compact 模式，现在我们也保留 frames 字典以便重建层级
+        for node in self.nodes_to_process:
+            if node.parent and node.parent.name in node_names:
+                data["frames"][node.name] = node.parent.name
 
         return data
 
