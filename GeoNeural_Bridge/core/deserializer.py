@@ -1,8 +1,8 @@
 # core/deserializer.py
-# GeoNeural Bridge v5.14.51
-# Critical Fix: 修复崩溃源与属性丢失 (Crash Vector & Domain Restore Fix)
-# Architecture: 重构反序列化生命周期，严格遵循 "Topology First, Data Later" 原则
-# 1. Skeleton -> 2. Heal -> 3. Pair (关键前置) -> 4. Props (含 Remap) -> 5. Links -> 6. Update
+# GeoNeural Bridge v5.14.60
+# Critical Fix: Ultimate AI Hallucination Fallback (Primary Socket Auto-Routing)
+# 修复: 当 AI 臆想了不存在的通用插槽名 (如 "Value") 时，强制回退连接到第一个有效插槽，确保拓扑连通，将纠错权交还给用户。
+# 架构: Topology First -> Heal -> Pair -> Props (Hybrid) -> Inputs (Link-Aware) -> Links (Smart/Fuzzy) -> Update
 
 import bpy
 import logging
@@ -18,15 +18,14 @@ except ImportError:
 logger = logging.getLogger("GeoNeuralBridge.deserializer")
 
 # ==============================================================================
-# 1. 智能属性设置器 (增强版)
+# 1. 智能属性设置器
 # ==============================================================================
 
 class SmartPropertySetter:
-    # [v5.14.51] 新增属性重映射表，解决 AI 幻觉与 API 差异
     PROP_REMAP = {
-        'domain_type': 'domain',       # AI 常见误称
-        'data_type': 'data_type',      # 保持不变
-        'mode': 'operation',           # Math 节点常见
+        'domain_type': 'domain',
+        'data_type': 'data_type',      
+        'mode': 'operation',
         'operation': 'operation',
     }
 
@@ -36,10 +35,8 @@ class SmartPropertySetter:
 
     @staticmethod
     def set_property(node, prop_name, value):
-        # 1. 映射属性名
         real_prop_name = SmartPropertySetter.resolve_prop_name(prop_name)
         
-        # 2. 基础存在性检查
         if not hasattr(node, real_prop_name):
             return False 
 
@@ -47,11 +44,9 @@ class SmartPropertySetter:
             rna_prop = node.bl_rna.properties.get(real_prop_name)
             if rna_prop and rna_prop.is_readonly: return True
 
-            # 3. 枚举模糊匹配
             if rna_prop and rna_prop.type == 'ENUM' and isinstance(value, str):
                 return SmartPropertySetter._set_enum_fuzzy(node, real_prop_name, value, rna_prop)
 
-            # 4. 数学类型转换
             current = getattr(node, real_prop_name)
             if isinstance(current, (Vector, Color, Euler)) and isinstance(value, (list, tuple)):
                 if isinstance(current, Color) and len(value) == 3:
@@ -86,29 +81,41 @@ class SmartPropertySetter:
 # ==============================================================================
 
 class NodeRestorer:
+    STRUCTURAL_KEYS = {
+        'name', 'bl_idname', 'inputs', 'outputs', 'parent', 'links', 
+        'properties', 'frames', 'nodes', 'tree_type', 'version',
+        'simulation_state', 'repeat_state', 'bake_state', 
+        'foreach_main', 'foreach_input', 'foreach_generation',
+        'capture_items_data'
+    }
+    
     PROP_BLACKLIST = {
         'active_item', 'active_index', 'inspection_index', 'is_active_output', 
         'interface', 'node_tree', 'color_ramp', 'warning_propagation',
-        'bl_idname', 'bl_label', 'bl_description', 'bl_icon', 'location', 'width', 'height',
+        'bl_label', 'bl_description', 'bl_icon', 'location', 'width', 'height',
         'active_input_index', 'active_main_index', 'active_generation_index'
     }
 
     @staticmethod
     def restore_props(node, data):
-        """
-        恢复属性。返回未成功应用的属性字典 (unassigned)。
-        """
         if 'label' in data: node.label = data['label']
         if 'mute' in data: node.mute = data['mute']
         if 'use_custom_color' in data: node.use_custom_color = data['use_custom_color']
         if 'color' in data: node.color = data['color']
         
-        props = data.get('properties', {})
-        if not isinstance(props, dict): return {}
+        defined_props = data.get('properties', {})
+        if not isinstance(defined_props, dict): defined_props = {}
+        
+        merged_props = defined_props.copy()
+        for key, value in data.items():
+            if key in NodeRestorer.STRUCTURAL_KEYS: continue
+            if key in NodeRestorer.PROP_BLACKLIST: continue
+            if key.startswith('<bpy_struct'): continue
+            if key not in merged_props:
+                merged_props[key] = value
 
         unassigned_props = {}
-
-        for raw_prop_name, value in props.items():
+        for raw_prop_name, value in merged_props.items():
             if raw_prop_name in NodeRestorer.PROP_BLACKLIST: continue
             if isinstance(value, str) and value.startswith('<bpy_struct'): continue
 
@@ -118,12 +125,8 @@ class NodeRestorer:
             
             if raw_prop_name == "capture_items_data": continue
 
-            # 尝试直接赋值
             success = SmartPropertySetter.set_property(node, raw_prop_name, value)
-            
-            if not success:
-                # 记录原始键名和值，供后续传播使用
-                unassigned_props[raw_prop_name] = value
+            if not success: unassigned_props[raw_prop_name] = value
 
         return unassigned_props
 
@@ -144,18 +147,107 @@ class NodeRestorer:
         except: pass
 
     @staticmethod
-    def restore_socket_defaults(node, inputs_data):
+    def _simulate_link_target(node, target_name, target_index, will_be_linked):
+        """精准预演后续 _restore_links 会选择哪一个插槽"""
+        sock = None
+        if target_index is not None and 0 <= target_index < len(node.inputs):
+            sock = node.inputs[target_index]
+        else:
+            for s in node.inputs:
+                if s.identifier == target_name: sock = s; break
+            if not sock:
+                for s in node.inputs:
+                    if s.name == target_name and s.bl_idname != 'NodeSocketVirtual': sock = s; break
+            if not sock and isinstance(target_name, str):
+                clean = re.sub(r'_\d+$', '', target_name).lower()
+                for s in node.inputs:
+                    if s.name.lower() == clean and s.bl_idname != 'NodeSocketVirtual': sock = s; break
+            if not sock:
+                type_keywords = {
+                    "GEOMETRY": "NodeSocketGeometry", "VECTOR": "NodeSocketVector",
+                    "SHADER": "NodeSocketShader", "COLOR": "NodeSocketColor",
+                    "IMAGE": "NodeSocketImage", "OBJECT": "NodeSocketObject",
+                    "COLLECTION": "NodeSocketCollection", "MATERIAL": "NodeSocketMaterial",
+                    "STRING": "NodeSocketString", "ROTATION": "NodeSocketRotation", "MATRIX": "NodeSocketMatrix"
+                }
+                if target_name and target_name.upper() in type_keywords:
+                    target_id = type_keywords[target_name.upper()]
+                    for s in node.inputs:
+                        if s.bl_idname == target_id and not s.hide and s.enabled: 
+                            sock = s; break
+                            
+            # [v5.14.60] 新增：幻觉兜底预演
+            if not sock:
+                generic_terms = {"VALUE", "RESULT", "OUTPUT", "INPUT", "DATA", "ANY"}
+                if target_name and str(target_name).upper() in generic_terms:
+                    for s in node.inputs:
+                        if s.bl_idname != 'NodeSocketVirtual' and not s.hide and s.enabled:
+                            sock = s; break
+        
+        if sock and sock in will_be_linked and target_index is None:
+            original_name = sock.name
+            for other_sock in node.inputs:
+                if other_sock == sock: continue
+                if other_sock.name == original_name and other_sock not in will_be_linked:
+                    sock = other_sock; break
+        return sock
+
+    @staticmethod
+    def restore_socket_defaults(node, inputs_data, node_name=None, links_data=None):
         if not isinstance(inputs_data, list): return
+        
+        will_be_linked = set()
+        if node_name and links_data:
+            incoming = [l for l in links_data if l.get('to_node') == node_name]
+            for link in incoming:
+                t_name = link.get('to_socket')
+                t_idx = link.get('to_socket_index')
+                target_sock = NodeRestorer._simulate_link_target(node, t_name, t_idx, will_be_linked)
+                if target_sock:
+                    will_be_linked.add(target_sock)
+
+        assigned_sockets = set()
+        
         for s_data in inputs_data:
             if not isinstance(s_data, dict): continue
             if s_data.get('identifier') == '__extend__' or s_data.get('bl_socket_idname') == 'NodeSocketVirtual': continue
             
-            socket = None
+            idx = s_data.get('index')
             ident = s_data.get('identifier')
-            if ident: socket = next((s for s in node.inputs if s.identifier == ident), None)
-            if not socket:
-                name = s_data.get('name')
-                if name: socket = next((s for s in node.inputs if s.name == name), None)
+            name = s_data.get('name')
+            
+            candidates = []
+            if idx is not None and 0 <= idx < len(node.inputs):
+                candidates.append(node.inputs[idx])
+            else:
+                for s in node.inputs:
+                    if (ident and s.identifier == ident) or (name and s.name == name) or (name and s.identifier == name) or (ident and s.name == ident):
+                        if s.bl_idname != 'NodeSocketVirtual' and s not in candidates:
+                            candidates.append(s)
+                if not candidates and name and isinstance(name, str):
+                    clean = re.sub(r'_\d+$', '', name).lower()
+                    for s in node.inputs:
+                        if s.name.lower() == clean and s.bl_idname != 'NodeSocketVirtual' and s not in candidates:
+                            candidates.append(s)
+                            
+                # [v5.14.60] 新增：输入值幻觉兜底
+                if not candidates and name:
+                    generic_terms = {"VALUE", "RESULT", "OUTPUT", "INPUT", "DATA", "ANY"}
+                    if str(name).upper() in generic_terms:
+                        for s in node.inputs:
+                            if s.bl_idname != 'NodeSocketVirtual' and not s.hide and s.enabled and s not in candidates:
+                                candidates.append(s)
+            
+            socket = None
+            avail = [s for s in candidates if s not in will_be_linked and s not in assigned_sockets]
+            if avail: 
+                socket = avail[0]
+            else:
+                unassigned = [s for s in candidates if s not in assigned_sockets]
+                if unassigned: 
+                    socket = unassigned[0]
+                elif candidates: 
+                    socket = candidates[0]
 
             if socket and 'default_value' in s_data:
                 try:
@@ -178,9 +270,10 @@ class NodeRestorer:
             if socket:
                 if 'hide' in s_data: socket.hide = s_data['hide']
                 if 'hide_value' in s_data: socket.hide_value = s_data['hide_value']
+                assigned_sockets.add(socket)
 
 # ==============================================================================
-# 3. 反序列化主引擎 (生命周期重构版)
+# 3. 反序列化主引擎
 # ==============================================================================
 
 class DeserializationEngine:
@@ -198,57 +291,36 @@ class DeserializationEngine:
         links_data = json_data.get("links", [])
         frames_data = json_data.get("frames", {})
 
-        # ----------------------------------------------------------------------
-        # Step 1: 骨架构建 (Skeleton)
-        # ----------------------------------------------------------------------
         ordered_nodes = self._sort_priority(nodes_data)
         for n_data in ordered_nodes:
             if isinstance(n_data, dict):
                 self._create_node_skeleton(n_data, offset)
 
-        # ----------------------------------------------------------------------
-        # Step 2: 拓扑愈合 (Topology Healing) - 确保配对节点存在
-        # ----------------------------------------------------------------------
         self._heal_topology(offset)
-
-        # ----------------------------------------------------------------------
-        # Step 3: 区域配对 (Zone Pairing) - 关键前置！
-        # ----------------------------------------------------------------------
-        # [CRITICAL FIX] 必须在 restore_props 和 update_tag 之前完成配对
-        # 否则 (1) 属性无法传播 (2) 图表无效导致崩溃
         self._pair_zones()
 
-        # ----------------------------------------------------------------------
-        # Step 4: 属性恢复与传播 (Properties & Propagation)
-        # ----------------------------------------------------------------------
         for n_data in nodes_data:
             if not isinstance(n_data, dict): continue
             node = self.node_map.get(n_data.get('name'))
             if not node: continue
             
-            # 依赖恢复 (Node Tree)
             if node.bl_idname == 'GeometryNodeGroup' and 'node_tree_name' in n_data:
                 self._restore_node_tree_dependency(node, n_data)
 
-            # 核心属性恢复
             unassigned = NodeRestorer.restore_props(node, n_data)
             
-            # [v5.14.51] 立即尝试传播未分配的属性 (Propagate Immediately)
-            # 因为此时配对关系已建立，我们可以直接查找 partner
             if unassigned:
                 self._propagate_attributes(node, unassigned)
 
-            # 遗留数据适配
             props = n_data.get('properties', {})
-            if 'capture_items_data' in props:
-                self._restore_capture_items(node, props['capture_items_data'])
-            elif 'data_type' in props and hasattr(node, 'capture_items'):
-                self._adapt_legacy_capture_node(node, props['data_type'])
+            capture_items = n_data.get('capture_items_data') or props.get('capture_items_data')
+            legacy_dt = n_data.get('data_type') or props.get('data_type')
 
-        # ----------------------------------------------------------------------
-        # Step 5: 内部列表内容恢复 (Internal Lists)
-        # ----------------------------------------------------------------------
-        # 此时拓扑已闭环，恢复 Zone 内部 Item 是安全的
+            if capture_items:
+                self._restore_capture_items(node, capture_items)
+            elif legacy_dt and hasattr(node, 'capture_items'):
+                self._adapt_legacy_capture_node(node, legacy_dt)
+
         for n_data in nodes_data:
             if not isinstance(n_data, dict): continue
             node = self.node_map.get(n_data.get('name'))
@@ -262,21 +334,18 @@ class DeserializationEngine:
             if 'foreach_main' in n_data or 'foreach_input' in n_data or 'foreach_generation' in n_data:
                 self._restore_foreach_stats(node, n_data)
 
-        # ----------------------------------------------------------------------
-        # Step 6: Socket 数值恢复
-        # ----------------------------------------------------------------------
         for n_data in nodes_data:
             if not isinstance(n_data, dict): continue
-            node = self.node_map.get(n_data.get('name'))
+            name = n_data.get('name')
+            node = self.node_map.get(name)
             if not node: continue
-            if 'inputs' in n_data: NodeRestorer.restore_socket_defaults(node, n_data['inputs'])
+            if 'inputs' in n_data: 
+                NodeRestorer.restore_socket_defaults(node, n_data['inputs'], node_name=name, links_data=links_data)
+            
             if 'outputs' in n_data:
                  for i, out in enumerate(n_data['outputs']):
                     if isinstance(out, dict) and i < len(node.outputs) and out.get('hide'): node.outputs[i].hide = True
 
-        # ----------------------------------------------------------------------
-        # Step 7: 连接与层级 (Links & Parenting)
-        # ----------------------------------------------------------------------
         self._restore_links(links_data)
         
         final_frames = frames_data.copy() if isinstance(frames_data, dict) else {}
@@ -287,10 +356,6 @@ class DeserializationEngine:
                 if child and parent: child.parent = parent
         self._restore_frames(final_frames)
 
-        # ----------------------------------------------------------------------
-        # Step 8: 安全更新 (Safe Update) - 最后一步
-        # ----------------------------------------------------------------------
-        # 只有在拓扑完整、配对成功、连线完成后的 Update 才是安全的
         if hasattr(self.tree, "update_tag"): 
             try: self.tree.update_tag()
             except Exception as e: logger.warning(f"Final update_tag warning: {e}")
@@ -299,10 +364,6 @@ class DeserializationEngine:
         return list(self.node_map.values())
 
     def _pair_zones(self):
-        """
-        [v5.14.51] 纯粹的配对逻辑，不再负责传播属性。
-        配对必须在 restore_props 之前完成。
-        """
         zone_types = {
             'GeometryNodeSimulationInput': 'GeometryNodeSimulationOutput',
             'GeometryNodeRepeatInput': 'GeometryNodeRepeatOutput',
@@ -321,39 +382,18 @@ class DeserializationEngine:
             out_nodes = outputs.get(out_type, [])
             count = min(len(in_nodes), len(out_nodes))
             for i in range(count):
-                input_node = in_nodes[i]
-                output_node = out_nodes[i]
                 try:
-                    if hasattr(input_node, 'pair_with_output'):
-                        input_node.pair_with_output(output_node)
+                    if hasattr(in_nodes[i], 'pair_with_output'):
+                        in_nodes[i].pair_with_output(out_nodes[i])
                 except: pass
 
     def _propagate_attributes(self, source_node, props_dict):
-        """
-        [v5.14.51] 属性传播逻辑
-        尝试将 source_node 上无法应用的属性，应用到其 paired_output (或 input) 上。
-        """
-        partner = None
-        
-        # 寻找 partner
-        if hasattr(source_node, "paired_output"): # Input Node
-            partner = source_node.paired_output
-        elif hasattr(source_node, "paired_input"): # Output Node (less common API)
-             # Blender API 有时没有直接的 paired_input 属性，需反向查找，
-             # 但通常属性是定义在 Input 上的，所以上面的 check 最重要。
-             pass 
-
-        if not partner:
-            # 备用方案：通过 zone_type 手动查找已配对的 partner
-            # (由于 Step 3 已执行配对，这里可以通过拓扑查找)
-            pass 
-
+        partner = getattr(source_node, "paired_output", None)
         if partner:
-            for p_name, p_val in props_dict.items():
-                SmartPropertySetter.set_property(partner, p_name, p_val)
+            for p_name, p_val in props_dict.items(): SmartPropertySetter.set_property(partner, p_name, p_val)
 
     # --------------------------------------------------------------------------
-    # 辅助方法 (保持不变)
+    # 辅助方法
     # --------------------------------------------------------------------------
     
     def _restore_node_tree_dependency(self, node, n_data):
@@ -526,15 +566,24 @@ class DeserializationEngine:
             if src and dst:
                 from_sock = self._find_socket(src.outputs, link.get('from_socket'), link.get('from_socket_index'))
                 to_sock = self._find_socket(dst.inputs, link.get('to_socket'), link.get('to_socket_index'))
+                
+                # Smart Collision Avoidance
+                if to_sock and to_sock.is_linked and link.get('to_socket_index') is None:
+                    original_name = to_sock.name
+                    for other_sock in dst.inputs:
+                        if other_sock == to_sock: continue
+                        if other_sock.name == original_name and not other_sock.is_linked:
+                            to_sock = other_sock
+                            break
+
                 if from_sock and to_sock:
                     try: self.tree.links.new(from_sock, to_sock)
                     except: pass
 
     def _find_socket(self, collection, name, index):
         if index is not None and 0 <= index < len(collection):
-            s = collection[index]
-            if s.name == name or s.identifier == name: return s
-        for i, s in enumerate(collection):
+            return collection[index]
+        for s in collection:
             if s.identifier == name: return s
         for s in collection:
             if s.name == name and s.bl_idname != 'NodeSocketVirtual': return s
@@ -553,8 +602,14 @@ class DeserializationEngine:
             target = type_keywords[name.upper()]
             for s in collection:
                 if s.bl_idname == target and not s.hide and s.enabled: return s
-        if index is not None and 0 <= index < len(collection):
-            return collection[index]
+                
+        # [v5.14.60] 终极 AI 幻觉兜底 (Primary Socket Fallback)
+        generic_terms = {"VALUE", "RESULT", "OUTPUT", "INPUT", "DATA", "ANY"}
+        if name and str(name).upper() in generic_terms:
+            for s in collection:
+                if s.bl_idname != 'NodeSocketVirtual' and not s.hide and s.enabled:
+                    return s
+                    
         return None
 
     def _restore_frames(self, frames_data):
