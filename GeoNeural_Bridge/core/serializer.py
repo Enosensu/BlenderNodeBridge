@@ -1,9 +1,8 @@
 # core/serializer.py
-# GeoNeural Bridge v5.14.54
-# 修复: 
-# 1. Compact 模式下强制保留 NodeFrame (语义锚点)
-# 2. Socket default_value 读取增加 Try-Except 防护 (防止 Geometry Socket 崩溃)
-# 基础: v5.14.45
+# GeoNeural Bridge v5.14.62
+# Critical Fix: Separated Blacklists for Compact Mode
+# 修复: 解决了 Compact 模式下误删根层级 'name' 和 'bl_idname' 导致导入端崩溃的问题。
+# 架构: 将过滤黑名单解耦为 ROOT_BLACKLIST (机械数据) 与 PROPS_BLACKLIST (UI 冗余)。
 
 import bpy
 import logging
@@ -47,54 +46,82 @@ class DataCleaner:
         }
 
 # ==============================================================================
-# 2. 精简过滤器
+# 2. 极致精简过滤器
 # ==============================================================================
 
 class CompactFilter:
-    NODE_PROP_BLACKLIST = {
-        'location', 'location_absolute', 
-        'width', 'height', 'color', 'use_custom_color', 
-        'select', 'hide', 'bl_icon',
-        'bl_width_default', 'bl_width_min', 'bl_width_max',
-        'bl_height_default', 'bl_height_min', 'bl_height_max',
-        'active_index', 'active_item', 'active_input_index', 'active_generation_index', 'active_main_index',
-        'inspection_index', 'warning_propagation',
-        'bl_description'
+    # [v5.14.62] 根层级黑名单: 仅清理纯视觉/位置的机械数据，绝对保留 name, bl_idname
+    ROOT_BLACKLIST = {
+        'location', 'location_absolute', 'width', 'height', 'color', 'use_custom_color', 
+        'select', 'hide', 'bl_icon', 'bl_width_default', 'bl_width_min', 'bl_width_max',
+        'bl_height_default', 'bl_height_min', 'bl_height_max', 'mute'
     }
+    
+    # [v5.14.62] Properties字典黑名单: 清理 UI 垃圾及已经存在于根层级的重复项
+    PROPS_BLACKLIST = {
+        'name', 'bl_idname', 'label', 'mute', # 根层级已有，此处剔除
+        'show_options', 'show_preview', 'show_texture', 'bl_label', 'shrink', 'label_size',
+        'active_index', 'active_item', 'active_input_index', 'active_generation_index', 'active_main_index',
+        'inspection_index', 'warning_propagation', 'bl_description',
+        'location', 'location_absolute', 'width', 'height', 'color', 'use_custom_color', 
+        'select', 'hide', 'bl_icon'
+    }
+
     SOCKET_PROP_BLACKLIST = {
-        'enabled', 'hide', 'hide_value', 'label', 'description'
+        'enabled', 'hide', 'hide_value', 'label', 'description',
+        'direction', 'bl_socket_idname'
     }
 
     @staticmethod
     def process_node(node_data):
-        # [v5.14.54] 保留 NodeFrame 的 label 用于语义理解，哪怕在 Compact 模式
         is_frame = node_data.get('bl_idname') == 'NodeFrame'
         
-        for key in list(node_data.keys()):
-            # 特殊豁免: Frame 的 label 是语义关键
-            if is_frame and key == 'label': continue
-            if key in CompactFilter.NODE_PROP_BLACKLIST: del node_data[key]
+        # 1. 剔除多余的 parent
+        if 'parent' in node_data:
+            del node_data['parent']
             
+        # 2. 根层级清理
+        for key in list(node_data.keys()):
+            if key in CompactFilter.ROOT_BLACKLIST:
+                del node_data[key]
+                
+        # 3. Properties 字典深度清理
         if 'properties' in node_data:
             props = node_data['properties']
             for key in list(props.keys()):
-                if key in CompactFilter.NODE_PROP_BLACKLIST: del props[key]
-                elif isinstance(props[key], str) and props[key].startswith('<bpy_struct'): del props[key]
+                if key in CompactFilter.PROPS_BLACKLIST: 
+                    del props[key]
+                elif isinstance(props[key], str) and props[key].startswith('<bpy_struct'): 
+                    del props[key]
+            # 若为空则抹除
+            if not props:
+                del node_data['properties']
+                
+        # 4. 插槽清理
         for direction in ['inputs', 'outputs']:
             if direction in node_data:
                 for socket in node_data[direction]:
                     CompactFilter._process_socket(socket)
-        # 清理 Zone 列表颜色
+                
+                # 输出端默认不需要，除非有特殊连线需求(极简模式下直接剔除)
+                if direction == 'outputs' or not node_data[direction]:
+                    del node_data[direction]
+
+        # 5. Zone 状态清理
         for state_key in ['simulation_state', 'repeat_state', 'bake_state', 'foreach_main', 'foreach_input', 'foreach_generation']:
             if state_key in node_data:
                 for item in node_data[state_key].get('items', []):
                     if 'color' in item: del item['color']
+                    
         return node_data
 
     @staticmethod
     def _process_socket(socket_data):
         for key in list(socket_data.keys()):
             if key in CompactFilter.SOCKET_PROP_BLACKLIST: del socket_data[key]
+            
+        if socket_data.get('identifier') == socket_data.get('name'):
+            del socket_data['identifier']
 
 # ==============================================================================
 # 3. 序列化逻辑
@@ -123,13 +150,11 @@ class SocketSerializer:
             'label': getattr(socket, 'label', ''),
         }
         
-        # [v5.14.54] Safety Guard: 即使 hasattr 为真，读取 default_value 也可能崩溃
         if hasattr(socket, 'default_value'):
             try:
                 val = DataCleaner.clean_data(socket.default_value)
                 if val is not None: data['default_value'] = val
             except Exception:
-                # 某些 socket (如 NodeSocketGeometry) 访问 default_value 会抛错，忽略即可
                 pass
         
         if bl_idname == 'NodeSocketBundle' or data['type'] == 'BUNDLE':
@@ -206,7 +231,6 @@ class NodeSerializer:
 
     @staticmethod
     def _serialize_foreach_stats(node, data):
-        """序列化 For Each 节点的三个核心列表"""
         if hasattr(node, 'main_items'):
             data['foreach_main'] = NodeSerializer._serialize_item_collection(node.main_items)
         if hasattr(node, 'input_items'):
@@ -278,25 +302,14 @@ class SerializationEngine:
         self.selected_only = selected_only
         self.compact = compact
         
-        # 1. 获取初始选区
         initial_nodes = [n for n in tree.nodes if n.select] if selected_only else list(tree.nodes)
-        
-        # 2. [v5.14.45] 强制双向互补：确保 Zone 节点成对出现
         self.nodes_to_process = self._ensure_zone_integrity(initial_nodes)
-        
         self.connected_sockets = set()
 
     def _ensure_zone_integrity(self, nodes):
-        """
-        核心逻辑：扫描选中节点，如果发现是 Zone 的一部分（Input 或 Output），
-        强制将其配对的另一半加入列表。
-        """
         final_set = set(nodes)
-        # 使用 pointer 进行唯一性检查
         processed_ids = {n.as_pointer() for n in nodes}
 
-        # 构建反向查找表: { Output_Node: Input_Node }
-        # 遍历全树寻找所有的 Input 节点，并记录它们指向的 Output
         output_to_input_map = {}
         for n in self.tree.nodes:
             if hasattr(n, "paired_output") and n.paired_output:
@@ -304,16 +317,11 @@ class SerializationEngine:
 
         for node in list(final_set):
             partner = None
-
-            # Case A: 当前节点是 Input (有 paired_output 属性)
             if hasattr(node, "paired_output") and node.paired_output:
                 partner = node.paired_output
-
-            # Case B: 当前节点是 Output (在反向查找表中)
             elif node in output_to_input_map:
                 partner = output_to_input_map[node]
 
-            # 如果找到了配对伙伴，且伙伴不在选区中，则强制添加
             if partner and partner.as_pointer() not in processed_ids:
                 final_set.add(partner)
                 processed_ids.add(partner.as_pointer())
@@ -323,24 +331,33 @@ class SerializationEngine:
 
     def execute(self):
         node_names = {n.name for n in self.nodes_to_process}
-        
         links_data = []
+        
         for link in self.tree.links:
             if link.from_node.name in node_names and link.to_node.name in node_names:
                 link_data = {
-                    'from_node': link.from_node.name,
-                    'from_socket': link.from_socket.name,
-                    'from_socket_index': self._get_socket_index(link.from_node.outputs, link.from_socket),
-                    'to_node': link.to_node.name,
-                    'to_socket': link.to_socket.name,
-                    'to_socket_index': self._get_socket_index(link.to_node.inputs, link.to_socket)
+                    'src': link.from_node.name,
+                    'src_sock': getattr(link.from_socket, 'identifier', link.from_socket.name),
+                    'dst': link.to_node.name,
+                    'dst_sock': getattr(link.to_socket, 'identifier', link.to_socket.name)
                 }
+                
+                if not self.compact:
+                    link_data['from_node'] = link_data.pop('src')
+                    link_data['from_socket'] = link_data.pop('src_sock')
+                    link_data['from_socket_index'] = self._get_socket_index(link.from_node.outputs, link.from_socket)
+                    link_data['to_node'] = link_data.pop('dst')
+                    link_data['to_socket'] = link_data.pop('dst_sock')
+                    link_data['to_socket_index'] = self._get_socket_index(link.to_node.inputs, link.to_socket)
+                
                 links_data.append(link_data)
+                
                 if self.compact:
                     self.connected_sockets.add((link.to_node.name, link.to_socket.identifier))
+                    self.connected_sockets.add((link.to_node.name, link.to_socket.name))
 
         data = {
-            "version": "v5.14.54 Semantic-Frame",
+            "version": "v5.14.62 Ultra-Compact",
             "tree_type": self.tree.bl_idname,
             "nodes": [],
             "links": links_data,
@@ -348,24 +365,19 @@ class SerializationEngine:
         }
 
         for node in self.nodes_to_process:
-            # [v5.14.54] Compact 模式下不再跳过 Frame，因为 AI 需要语义分组
-            # 原代码: if self.compact and node.bl_idname == 'NodeFrame': continue
-            
             try:
                 node_data = NodeSerializer.serialize(node)
                 if self.compact:
                     node_data = CompactFilter.process_node(node_data)
-                    # 只有非 Frame 节点才需要清理未连接的 Input
                     if node.bl_idname != 'NodeFrame' and 'inputs' in node_data:
                         for inp in node_data['inputs']:
-                            if (node.name, inp['identifier']) in self.connected_sockets:
+                            if (node.name, inp.get('identifier', '')) in self.connected_sockets or \
+                               (node.name, inp.get('name', '')) in self.connected_sockets:
                                 if 'default_value' in inp: del inp['default_value']
                 data["nodes"].append(node_data)
             except Exception as e:
                 logger.error(f"Serialize error {node.name}: {e}")
 
-        # Frame parent 关系处理
-        # 即使在 compact 模式，现在我们也保留 frames 字典以便重建层级
         for node in self.nodes_to_process:
             if node.parent and node.parent.name in node_names:
                 data["frames"][node.name] = node.parent.name

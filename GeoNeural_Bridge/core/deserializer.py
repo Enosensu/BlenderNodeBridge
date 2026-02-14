@@ -1,8 +1,8 @@
 # core/deserializer.py
-# GeoNeural Bridge v5.14.60
-# Critical Fix: Ultimate AI Hallucination Fallback (Primary Socket Auto-Routing)
-# 修复: 当 AI 臆想了不存在的通用插槽名 (如 "Value") 时，强制回退连接到第一个有效插槽，确保拓扑连通，将纠错权交还给用户。
-# 架构: Topology First -> Heal -> Pair -> Props (Hybrid) -> Inputs (Link-Aware) -> Links (Smart/Fuzzy) -> Update
+# GeoNeural Bridge v5.14.64
+# Critical Fix: Semantic Sequence Mapping & SocketResolver Decoupling
+# 修复: 解决 AI 产生代数命名幻觉 (如误将 Boolean 节点的插槽呼叫为 "A" 或 "B") 导致的断连问题。
+# 架构: 抽象 SocketResolver 实现 100% 逻辑解耦，全面接管默认值注入与连线过程中的插槽搜索。
 
 import bpy
 import logging
@@ -77,7 +77,84 @@ class SmartPropertySetter:
         return False
 
 # ==============================================================================
-# 2. 节点恢复器
+# 2. [新增解耦] 终极插槽解析引擎 (Socket Resolver)
+# ==============================================================================
+
+class SocketResolver:
+    """遵循 SOLID 原则抽象出的插槽统一解析引擎，负责所有复杂名称的容错匹配。"""
+    @staticmethod
+    def resolve_candidates(collection, name_or_ident, index=None):
+        candidates = []
+        
+        # 0. 明确物理索引优先
+        if index is not None and 0 <= index < len(collection):
+            candidates.append(collection[index])
+            return candidates
+
+        if not name_or_ident:
+            return candidates
+
+        # 1. 精确匹配 (Identifier 或 Name)
+        for s in collection:
+            if s.identifier == name_or_ident or s.name == name_or_ident:
+                if s.bl_idname != 'NodeSocketVirtual' and s not in candidates:
+                    candidates.append(s)
+
+        if candidates:
+            return candidates
+
+        name_str = str(name_or_ident)
+        name_upper = name_str.strip().upper()
+
+        # 2. 去除后缀清洗匹配 (例如 "Value_001" -> "Value")
+        clean = re.sub(r'_\d+$', '', name_str).lower()
+        for s in collection:
+            if s.name.lower() == clean and s.bl_idname != 'NodeSocketVirtual' and s not in candidates:
+                candidates.append(s)
+
+        if candidates:
+            return candidates
+
+        # 3. 代数语义映射 (解决 AI 幻觉 A/B/X/Y)
+        if name_upper in {'A', 'B', 'C', 'D', 'X', 'Y', 'Z'}:
+            idx_map = {'A': 0, 'X': 0, 'B': 1, 'Y': 1, 'C': 2, 'Z': 2, 'D': 3}
+            valid_sockets = [s for s in collection if s.bl_idname != 'NodeSocketVirtual' and not s.hide and s.enabled]
+            target_idx = idx_map[name_upper]
+            if target_idx < len(valid_sockets):
+                candidates.append(valid_sockets[target_idx])
+            return candidates
+
+        # 4. 数据类型关键字泛化匹配
+        type_keywords = {
+            "GEOMETRY": "NodeSocketGeometry", "VECTOR": "NodeSocketVector",
+            "SHADER": "NodeSocketShader", "COLOR": "NodeSocketColor",
+            "IMAGE": "NodeSocketImage", "OBJECT": "NodeSocketObject",
+            "COLLECTION": "NodeSocketCollection", "MATERIAL": "NodeSocketMaterial",
+            "STRING": "NodeSocketString", "ROTATION": "NodeSocketRotation", "MATRIX": "NodeSocketMatrix",
+            "BOOLEAN": "NodeSocketBool", "BOOL": "NodeSocketBool",
+            "INT": "NodeSocketInt", "INTEGER": "NodeSocketInt",
+            "FLOAT": "NodeSocketFloat"
+        }
+        if name_upper in type_keywords:
+            target_id = type_keywords[name_upper]
+            for s in collection:
+                if s.bl_idname == target_id and not s.hide and s.enabled and s not in candidates:
+                    candidates.append(s)
+        
+        if candidates:
+            return candidates
+
+        # 5. 终极通用名词兜底
+        generic_terms = {"VALUE", "RESULT", "OUTPUT", "INPUT", "DATA", "ANY"}
+        if name_upper in generic_terms:
+            for s in collection:
+                if s.bl_idname != 'NodeSocketVirtual' and not s.hide and s.enabled and s not in candidates:
+                    candidates.append(s)
+
+        return candidates
+
+# ==============================================================================
+# 3. 节点恢复器
 # ==============================================================================
 
 class NodeRestorer:
@@ -93,7 +170,8 @@ class NodeRestorer:
         'active_item', 'active_index', 'inspection_index', 'is_active_output', 
         'interface', 'node_tree', 'color_ramp', 'warning_propagation',
         'bl_label', 'bl_description', 'bl_icon', 'location', 'width', 'height',
-        'active_input_index', 'active_main_index', 'active_generation_index'
+        'active_input_index', 'active_main_index', 'active_generation_index',
+        'show_options', 'show_preview', 'show_texture', 'shrink', 'label_size'
     }
 
     @staticmethod
@@ -149,40 +227,8 @@ class NodeRestorer:
     @staticmethod
     def _simulate_link_target(node, target_name, target_index, will_be_linked):
         """精准预演后续 _restore_links 会选择哪一个插槽"""
-        sock = None
-        if target_index is not None and 0 <= target_index < len(node.inputs):
-            sock = node.inputs[target_index]
-        else:
-            for s in node.inputs:
-                if s.identifier == target_name: sock = s; break
-            if not sock:
-                for s in node.inputs:
-                    if s.name == target_name and s.bl_idname != 'NodeSocketVirtual': sock = s; break
-            if not sock and isinstance(target_name, str):
-                clean = re.sub(r'_\d+$', '', target_name).lower()
-                for s in node.inputs:
-                    if s.name.lower() == clean and s.bl_idname != 'NodeSocketVirtual': sock = s; break
-            if not sock:
-                type_keywords = {
-                    "GEOMETRY": "NodeSocketGeometry", "VECTOR": "NodeSocketVector",
-                    "SHADER": "NodeSocketShader", "COLOR": "NodeSocketColor",
-                    "IMAGE": "NodeSocketImage", "OBJECT": "NodeSocketObject",
-                    "COLLECTION": "NodeSocketCollection", "MATERIAL": "NodeSocketMaterial",
-                    "STRING": "NodeSocketString", "ROTATION": "NodeSocketRotation", "MATRIX": "NodeSocketMatrix"
-                }
-                if target_name and target_name.upper() in type_keywords:
-                    target_id = type_keywords[target_name.upper()]
-                    for s in node.inputs:
-                        if s.bl_idname == target_id and not s.hide and s.enabled: 
-                            sock = s; break
-                            
-            # [v5.14.60] 新增：幻觉兜底预演
-            if not sock:
-                generic_terms = {"VALUE", "RESULT", "OUTPUT", "INPUT", "DATA", "ANY"}
-                if target_name and str(target_name).upper() in generic_terms:
-                    for s in node.inputs:
-                        if s.bl_idname != 'NodeSocketVirtual' and not s.hide and s.enabled:
-                            sock = s; break
+        candidates = SocketResolver.resolve_candidates(node.inputs, target_name, target_index)
+        sock = candidates[0] if candidates else None
         
         if sock and sock in will_be_linked and target_index is None:
             original_name = sock.name
@@ -198,10 +244,10 @@ class NodeRestorer:
         
         will_be_linked = set()
         if node_name and links_data:
-            incoming = [l for l in links_data if l.get('to_node') == node_name]
+            incoming = [l for l in links_data if l.get('to_node') == node_name or l.get('dst') == node_name]
             for link in incoming:
-                t_name = link.get('to_socket')
-                t_idx = link.get('to_socket_index')
+                t_name = link.get('to_socket') or link.get('dst_sock')
+                t_idx = link.get('to_socket_index') or link.get('dst_idx')
                 target_sock = NodeRestorer._simulate_link_target(node, t_name, t_idx, will_be_linked)
                 if target_sock:
                     will_be_linked.add(target_sock)
@@ -213,30 +259,9 @@ class NodeRestorer:
             if s_data.get('identifier') == '__extend__' or s_data.get('bl_socket_idname') == 'NodeSocketVirtual': continue
             
             idx = s_data.get('index')
-            ident = s_data.get('identifier')
-            name = s_data.get('name')
+            name_or_ident = s_data.get('identifier') or s_data.get('name')
             
-            candidates = []
-            if idx is not None and 0 <= idx < len(node.inputs):
-                candidates.append(node.inputs[idx])
-            else:
-                for s in node.inputs:
-                    if (ident and s.identifier == ident) or (name and s.name == name) or (name and s.identifier == name) or (ident and s.name == ident):
-                        if s.bl_idname != 'NodeSocketVirtual' and s not in candidates:
-                            candidates.append(s)
-                if not candidates and name and isinstance(name, str):
-                    clean = re.sub(r'_\d+$', '', name).lower()
-                    for s in node.inputs:
-                        if s.name.lower() == clean and s.bl_idname != 'NodeSocketVirtual' and s not in candidates:
-                            candidates.append(s)
-                            
-                # [v5.14.60] 新增：输入值幻觉兜底
-                if not candidates and name:
-                    generic_terms = {"VALUE", "RESULT", "OUTPUT", "INPUT", "DATA", "ANY"}
-                    if str(name).upper() in generic_terms:
-                        for s in node.inputs:
-                            if s.bl_idname != 'NodeSocketVirtual' and not s.hide and s.enabled and s not in candidates:
-                                candidates.append(s)
+            candidates = SocketResolver.resolve_candidates(node.inputs, name_or_ident, idx)
             
             socket = None
             avail = [s for s in candidates if s not in will_be_linked and s not in assigned_sockets]
@@ -273,7 +298,7 @@ class NodeRestorer:
                 assigned_sockets.add(socket)
 
 # ==============================================================================
-# 3. 反序列化主引擎
+# 4. 反序列化主引擎
 # ==============================================================================
 
 class DeserializationEngine:
@@ -480,18 +505,25 @@ class DeserializationEngine:
         return outputs + normals + frames
 
     def _create_node_skeleton(self, n_data, offset):
-        bl_idname = n_data.get('bl_idname')
+        bl_idname = n_data.get('bl_idname', 'NodeFrame')
         orig_name = n_data.get('name')
-        try: node = self.tree.nodes.new(bl_idname)
+        
+        try: 
+            node = self.tree.nodes.new(bl_idname)
         except: 
             node = self.tree.nodes.new("NodeFrame")
             node.label = f"MISSING: {bl_idname}"
         
-        node.name = orig_name 
+        if orig_name:
+            node.name = orig_name 
+        else:
+            orig_name = node.name
+            n_data['name'] = orig_name
+            
         self.node_map[orig_name] = node
         
-        if 'location' in n_data:
-            loc = n_data['location']
+        loc = n_data.get('location')
+        if loc and isinstance(loc, (list, tuple)) and len(loc) >= 2:
             node.location = (loc[0] + offset[0], loc[1] + offset[1])
         else:
             idx = len(self.node_map)
@@ -559,58 +591,96 @@ class DeserializationEngine:
 
     def _restore_links(self, links_data):
         if not isinstance(links_data, list): return
+        
+        dead_links = []
+        connected_sources = set()
+        connected_destinations = set()
+        
         for link in links_data:
             if not isinstance(link, dict): continue
-            src = self.node_map.get(link.get('from_node'))
-            dst = self.node_map.get(link.get('to_node'))
-            if src and dst:
-                from_sock = self._find_socket(src.outputs, link.get('from_socket'), link.get('from_socket_index'))
-                to_sock = self._find_socket(dst.inputs, link.get('to_socket'), link.get('to_socket_index'))
+            
+            src_name = link.get('src') or link.get('from_node')
+            dst_name = link.get('dst') or link.get('to_node')
+            
+            src = self.node_map.get(src_name)
+            if not src and src_name in self.tree.nodes:
+                src = self.tree.nodes.get(src_name)
                 
-                # Smart Collision Avoidance
-                if to_sock and to_sock.is_linked and link.get('to_socket_index') is None:
-                    original_name = to_sock.name
-                    for other_sock in dst.inputs:
-                        if other_sock == to_sock: continue
-                        if other_sock.name == original_name and not other_sock.is_linked:
-                            to_sock = other_sock
-                            break
+            dst = self.node_map.get(dst_name)
+            if not dst and dst_name in self.tree.nodes:
+                dst = self.tree.nodes.get(dst_name)
+            
+            if src and dst:
+                if self._create_single_link(src, dst, link):
+                    connected_sources.add(src.name)
+                    connected_destinations.add(dst.name)
+            elif not src and dst:
+                dead_links.append(link)
+                connected_destinations.add(dst.name)
+                
+        if dead_links:
+            self._heal_dead_links(dead_links, connected_sources, connected_destinations)
 
-                if from_sock and to_sock:
-                    try: self.tree.links.new(from_sock, to_sock)
-                    except: pass
+    def _create_single_link(self, src, dst, link):
+        from_sock_name = link.get('src_sock') or link.get('from_socket')
+        to_sock_name = link.get('dst_sock') or link.get('to_socket')
+        
+        from_idx = link.get('src_idx') or link.get('from_socket_index')
+        to_idx = link.get('dst_idx') or link.get('to_socket_index')
+
+        candidates_src = SocketResolver.resolve_candidates(src.outputs, from_sock_name, from_idx)
+        from_sock = candidates_src[0] if candidates_src else None
+        
+        candidates_dst = SocketResolver.resolve_candidates(dst.inputs, to_sock_name, to_idx)
+        to_sock = candidates_dst[0] if candidates_dst else None
+
+        if not from_sock and len(src.outputs) > 0:
+             from_sock = next((s for s in src.outputs if not s.hide and s.enabled and s.bl_idname != 'NodeSocketVirtual'), None)
+
+        if to_sock and to_sock.is_linked and to_idx is None:
+            original_name = to_sock.name
+            for other_sock in dst.inputs:
+                if other_sock == to_sock: continue
+                if other_sock.name == original_name and not other_sock.is_linked:
+                    to_sock = other_sock
+                    break
+
+        if from_sock and to_sock:
+            try: 
+                self.tree.links.new(from_sock, to_sock)
+                return True
+            except: pass
+        return False
+
+    def _heal_dead_links(self, dead_links, connected_sources, connected_destinations):
+        for link in dead_links:
+            dst_name = link.get('dst') or link.get('to_node')
+            dst = self.node_map.get(dst_name) or self.tree.nodes.get(dst_name)
+            if not dst: continue
+            
+            candidates = [n for n in self.node_map.values() if n.name not in connected_sources and len(n.outputs) > 0]
+            if not candidates: continue
+            
+            best_candidate = None
+            best_score = -1
+            
+            for cand in candidates:
+                score = 0
+                if cand.name not in connected_destinations: score += 10 
+                if "Input" in cand.bl_idname or "Info" in cand.bl_idname or "Time" in cand.bl_idname: score += 5
+                
+                if score > best_score:
+                    best_score = score
+                    best_candidate = cand
+                    
+            if best_candidate:
+                if self._create_single_link(best_candidate, dst, link):
+                    connected_sources.add(best_candidate.name)
+                    logger.info(f"Auto-Healed hallucinated link using orphan node: {best_candidate.name}")
 
     def _find_socket(self, collection, name, index):
-        if index is not None and 0 <= index < len(collection):
-            return collection[index]
-        for s in collection:
-            if s.identifier == name: return s
-        for s in collection:
-            if s.name == name and s.bl_idname != 'NodeSocketVirtual': return s
-        if isinstance(name, str):
-            clean = re.sub(r'_\d+$', '', name).lower()
-            for s in collection:
-                if s.name.lower() == clean and s.bl_idname != 'NodeSocketVirtual': return s
-        type_keywords = {
-            "GEOMETRY": "NodeSocketGeometry", "VECTOR": "NodeSocketVector",
-            "SHADER": "NodeSocketShader", "COLOR": "NodeSocketColor",
-            "IMAGE": "NodeSocketImage", "OBJECT": "NodeSocketObject",
-            "COLLECTION": "NodeSocketCollection", "MATERIAL": "NodeSocketMaterial",
-            "STRING": "NodeSocketString", "ROTATION": "NodeSocketRotation", "MATRIX": "NodeSocketMatrix"
-        }
-        if name and name.upper() in type_keywords:
-            target = type_keywords[name.upper()]
-            for s in collection:
-                if s.bl_idname == target and not s.hide and s.enabled: return s
-                
-        # [v5.14.60] 终极 AI 幻觉兜底 (Primary Socket Fallback)
-        generic_terms = {"VALUE", "RESULT", "OUTPUT", "INPUT", "DATA", "ANY"}
-        if name and str(name).upper() in generic_terms:
-            for s in collection:
-                if s.bl_idname != 'NodeSocketVirtual' and not s.hide and s.enabled:
-                    return s
-                    
-        return None
+        candidates = SocketResolver.resolve_candidates(collection, name, index)
+        return candidates[0] if candidates else None
 
     def _restore_frames(self, frames_data):
         if not isinstance(frames_data, dict): return
