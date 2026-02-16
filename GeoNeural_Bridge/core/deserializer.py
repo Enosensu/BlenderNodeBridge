@@ -1,8 +1,8 @@
 # core/deserializer.py
-# GeoNeural Bridge v5.14.64
-# Critical Fix: Semantic Sequence Mapping & SocketResolver Decoupling
-# 修复: 解决 AI 产生代数命名幻觉 (如误将 Boolean 节点的插槽呼叫为 "A" 或 "B") 导致的断连问题。
-# 架构: 抽象 SocketResolver 实现 100% 逻辑解耦，全面接管默认值注入与连线过程中的插槽搜索。
+# GeoNeural Bridge v5.14.72 (The Ultimate Polymorphic Engine)
+# 架构突破: 废除硬编码映射字典。将“多态清洗”与“词序无关匹配”同时应用于底层 API Identifier 与顶层 UI Name。
+# 理由: 彻底解决 AI 基于 UI 名称臆测枚举值的乱序、变体问题，实现最高级别的架构通用性。
+# 流程: Topology First -> Heal -> Pair (Ledger) -> Props (Dual-Track Fuzzy Enum) -> Inputs -> Links -> Update
 
 import bpy
 import logging
@@ -18,7 +18,7 @@ except ImportError:
 logger = logging.getLogger("GeoNeuralBridge.deserializer")
 
 # ==============================================================================
-# 1. 智能属性设置器
+# 1. 智能属性设置器 (双轨多态匹配引擎)
 # ==============================================================================
 
 class SmartPropertySetter:
@@ -27,6 +27,7 @@ class SmartPropertySetter:
         'data_type': 'data_type',      
         'mode': 'operation',
         'operation': 'operation',
+        'input_type': 'input_type'
     }
 
     @staticmethod
@@ -63,59 +64,95 @@ class SmartPropertySetter:
 
     @staticmethod
     def _set_enum_fuzzy(node, prop_name, value, rna_prop):
-        valid_items = [item.identifier for item in rna_prop.enum_items]
-        if value in valid_items: setattr(node, prop_name, value); return True
+        """
+        [v5.14.72 终极重构] 双轨多态解析引擎 (Dual-Track Polymorphic Resolver)
+        同时对比枚举项的 API identifier 和 UI name，通过纯算法解决所有缩写、别名、乱序问题。
+        """
+        enum_items = rna_prop.enum_items
         
-        norm_val = value.upper().replace(" ", "_")
-        if norm_val in valid_items: setattr(node, prop_name, norm_val); return True
+        # 1. 输入值多态清洗
+        val_str = str(value)
+        camel_to_snake = re.sub(r'([a-z])([A-Z])', r'\1_\2', val_str)
+        norm_val = camel_to_snake.upper().replace(" ", "_").replace("-", "_")
         
-        for item in valid_items:
-            if item == norm_val: setattr(node, prop_name, item); return True
+        def get_sorted_tokens(s):
+            return sorted([t for t in s.split('_') if t])
             
-        matches = difflib.get_close_matches(norm_val, valid_items, n=1, cutoff=0.6)
-        if matches: setattr(node, prop_name, matches[0]); return True
+        norm_tokens = get_sorted_tokens(norm_val)
+        
+        best_match_ident = None
+        best_match_score = 0.0
+
+        for item in enum_items:
+            # 提取双轨特征
+            ident = item.identifier
+            name = item.name
+            
+            # 特征清洗
+            ident_clean = ident.upper()
+            name_clean = name.upper().replace(" ", "_").replace("-", "_")
+            
+            # 优先级 1: 精确匹配 (涵盖了 identifier 和清洗后的 UI name)
+            if norm_val == ident_clean or norm_val == name_clean:
+                setattr(node, prop_name, ident)
+                return True
+                
+            # 优先级 2: 词序无关匹配 (完美解决 AND_NOT <-> NOT_AND 的问题)
+            ident_tokens = get_sorted_tokens(ident_clean)
+            name_tokens = get_sorted_tokens(name_clean)
+            
+            if norm_tokens and (norm_tokens == ident_tokens or norm_tokens == name_tokens):
+                setattr(node, prop_name, ident)
+                return True
+                
+            # 记录用于优先级 3 (Difflib) 的最高分
+            score_ident = difflib.SequenceMatcher(None, norm_val, ident_clean).ratio()
+            score_name = difflib.SequenceMatcher(None, norm_val, name_clean).ratio()
+            max_score = max(score_ident, score_name)
+            
+            if max_score > best_match_score:
+                best_match_score = max_score
+                best_match_ident = ident
+                
+        # 优先级 3: 终极模糊兜底
+        if best_match_score >= 0.6 and best_match_ident:
+            setattr(node, prop_name, best_match_ident)
+            return True
+            
         return False
 
 # ==============================================================================
-# 2. [新增解耦] 终极插槽解析引擎 (Socket Resolver)
+# 2. 终极插槽解析引擎
 # ==============================================================================
 
 class SocketResolver:
-    """遵循 SOLID 原则抽象出的插槽统一解析引擎，负责所有复杂名称的容错匹配。"""
     @staticmethod
     def resolve_candidates(collection, name_or_ident, index=None):
         candidates = []
         
-        # 0. 明确物理索引优先
         if index is not None and 0 <= index < len(collection):
             candidates.append(collection[index])
             return candidates
 
-        if not name_or_ident:
-            return candidates
+        if not name_or_ident: return candidates
 
-        # 1. 精确匹配 (Identifier 或 Name)
         for s in collection:
             if s.identifier == name_or_ident or s.name == name_or_ident:
                 if s.bl_idname != 'NodeSocketVirtual' and s not in candidates:
                     candidates.append(s)
 
-        if candidates:
-            return candidates
+        if candidates: return candidates
 
         name_str = str(name_or_ident)
         name_upper = name_str.strip().upper()
 
-        # 2. 去除后缀清洗匹配 (例如 "Value_001" -> "Value")
         clean = re.sub(r'_\d+$', '', name_str).lower()
         for s in collection:
             if s.name.lower() == clean and s.bl_idname != 'NodeSocketVirtual' and s not in candidates:
                 candidates.append(s)
 
-        if candidates:
-            return candidates
+        if candidates: return candidates
 
-        # 3. 代数语义映射 (解决 AI 幻觉 A/B/X/Y)
         if name_upper in {'A', 'B', 'C', 'D', 'X', 'Y', 'Z'}:
             idx_map = {'A': 0, 'X': 0, 'B': 1, 'Y': 1, 'C': 2, 'Z': 2, 'D': 3}
             valid_sockets = [s for s in collection if s.bl_idname != 'NodeSocketVirtual' and not s.hide and s.enabled]
@@ -124,7 +161,6 @@ class SocketResolver:
                 candidates.append(valid_sockets[target_idx])
             return candidates
 
-        # 4. 数据类型关键字泛化匹配
         type_keywords = {
             "GEOMETRY": "NodeSocketGeometry", "VECTOR": "NodeSocketVector",
             "SHADER": "NodeSocketShader", "COLOR": "NodeSocketColor",
@@ -141,10 +177,8 @@ class SocketResolver:
                 if s.bl_idname == target_id and not s.hide and s.enabled and s not in candidates:
                     candidates.append(s)
         
-        if candidates:
-            return candidates
+        if candidates: return candidates
 
-        # 5. 终极通用名词兜底
         generic_terms = {"VALUE", "RESULT", "OUTPUT", "INPUT", "DATA", "ANY"}
         if name_upper in generic_terms:
             for s in collection:
@@ -192,6 +226,12 @@ class NodeRestorer:
             if key not in merged_props:
                 merged_props[key] = value
 
+        priority_keys = ['data_type', 'domain', 'domain_type', 'input_type']
+        for p_key in priority_keys:
+            if p_key in merged_props:
+                SmartPropertySetter.set_property(node, p_key, merged_props[p_key])
+                del merged_props[p_key]
+
         unassigned_props = {}
         for raw_prop_name, value in merged_props.items():
             if raw_prop_name in NodeRestorer.PROP_BLACKLIST: continue
@@ -226,7 +266,6 @@ class NodeRestorer:
 
     @staticmethod
     def _simulate_link_target(node, target_name, target_index, will_be_linked):
-        """精准预演后续 _restore_links 会选择哪一个插槽"""
         candidates = SocketResolver.resolve_candidates(node.inputs, target_name, target_index)
         sock = candidates[0] if candidates else None
         
@@ -259,8 +298,10 @@ class NodeRestorer:
             if s_data.get('identifier') == '__extend__' or s_data.get('bl_socket_idname') == 'NodeSocketVirtual': continue
             
             idx = s_data.get('index')
-            name_or_ident = s_data.get('identifier') or s_data.get('name')
+            ident = s_data.get('identifier')
+            name = s_data.get('name')
             
+            name_or_ident = ident or name
             candidates = SocketResolver.resolve_candidates(node.inputs, name_or_ident, idx)
             
             socket = None
@@ -288,6 +329,8 @@ class NodeRestorer:
                     elif socket.bl_idname == 'NodeSocketColor' and isinstance(val, list):
                         if len(val) == 3: val.append(1.0)
                         socket.default_value = val
+                    elif socket.bl_idname in ('NodeSocketBool', 'NodeSocketBoolean') or socket.type == 'BOOLEAN':
+                        socket.default_value = bool(val)
                     else:
                         socket.default_value = val
                 except: pass
@@ -306,7 +349,8 @@ class DeserializationEngine:
         self.tree = tree
         self.context = context
         self.node_map = {}
-        self.deferred_props_map = {} 
+        self.deferred_props_map = {}
+        self._valid_pairs = set()
 
     def deserialize_tree(self, json_data, offset=(0,0)):
         if not isinstance(json_data, dict): return []
@@ -410,17 +454,16 @@ class DeserializationEngine:
                 try:
                     if hasattr(in_nodes[i], 'pair_with_output'):
                         in_nodes[i].pair_with_output(out_nodes[i])
-                except: pass
+                        self._valid_pairs.add(in_nodes[i].name)
+                        self._valid_pairs.add(out_nodes[i].name)
+                except Exception as e: 
+                    logger.warning(f"Zone pairing failed: {e}")
 
     def _propagate_attributes(self, source_node, props_dict):
         partner = getattr(source_node, "paired_output", None)
         if partner:
             for p_name, p_val in props_dict.items(): SmartPropertySetter.set_property(partner, p_name, p_val)
 
-    # --------------------------------------------------------------------------
-    # 辅助方法
-    # --------------------------------------------------------------------------
-    
     def _restore_node_tree_dependency(self, node, n_data):
         tree_name = n_data.get('node_tree_name')
         if not tree_name: return
@@ -533,6 +576,8 @@ class DeserializationEngine:
         if 'height' in n_data: node.height = n_data['height']
 
     def _restore_foreach_stats(self, node, n_data):
+        if node.name not in self._valid_pairs: return
+        
         mappings = [('main_items', 'foreach_main'), ('input_items', 'foreach_input'), ('generation_items', 'foreach_generation')]
         for col_name, json_key in mappings:
             if not hasattr(node, col_name) or json_key not in n_data: continue
@@ -546,6 +591,8 @@ class DeserializationEngine:
                 except: pass
 
     def _restore_zone_items(self, node, state_data, collection_name):
+        if node.name not in self._valid_pairs: return
+        
         if not hasattr(node, collection_name) or not isinstance(state_data, dict): return
         collection = getattr(node, collection_name)
         try: collection.clear()
@@ -677,10 +724,6 @@ class DeserializationEngine:
                 if self._create_single_link(best_candidate, dst, link):
                     connected_sources.add(best_candidate.name)
                     logger.info(f"Auto-Healed hallucinated link using orphan node: {best_candidate.name}")
-
-    def _find_socket(self, collection, name, index):
-        candidates = SocketResolver.resolve_candidates(collection, name, index)
-        return candidates[0] if candidates else None
 
     def _restore_frames(self, frames_data):
         if not isinstance(frames_data, dict): return
