@@ -1,8 +1,7 @@
 # core/serializer.py
-# GeoNeural Bridge v5.14.62
-# Critical Fix: Separated Blacklists for Compact Mode
-# 修复: 解决了 Compact 模式下误删根层级 'name' 和 'bl_idname' 导致导入端崩溃的问题。
-# 架构: 将过滤黑名单解耦为 ROOT_BLACKLIST (机械数据) 与 PROPS_BLACKLIST (UI 冗余)。
+# GeoNeural Bridge v5.14.74 (The Reroute-Bypass Optimizer)
+# 架构突破: 引入 TopologyTracer，在导出阶段递归穿透并剔除所有 NodeReroute (转接点)，提取最纯粹的直连拓扑图。
+# 理由: 消除转接点带来的 Virtual Socket 连线断裂风险，并极大降低 AI 分析节点结构的 Token 噪音。
 
 import bpy
 import logging
@@ -46,25 +45,50 @@ class DataCleaner:
         }
 
 # ==============================================================================
-# 2. 极致精简过滤器
+# 2. 拓扑追踪引擎 (新增解耦层)
+# ==============================================================================
+
+class TopologyTracer:
+    """递归图遍历器：负责穿透无意义的转接点，寻找真实的拓扑终点"""
+    @staticmethod
+    def get_real_destinations(socket, visited=None):
+        if visited is None:
+            visited = set()
+        
+        # 防死循环（用户可能连出闭环的转接点）
+        if socket in visited:
+            return []
+        visited.add(socket)
+        
+        # 如果命中真实节点，立即返回该插槽
+        if socket.node.bl_idname != 'NodeReroute':
+            return [socket]
+        
+        # 如果命中转接点，顺着它的输出继续递归
+        dests = []
+        if socket.node.outputs:
+            for out_link in socket.node.outputs[0].links:
+                dests.extend(TopologyTracer.get_real_destinations(out_link.to_socket, visited))
+        return dests
+
+# ==============================================================================
+# 3. 极致精简过滤器
 # ==============================================================================
 
 class CompactFilter:
-    # [v5.14.62] 根层级黑名单: 仅清理纯视觉/位置的机械数据，绝对保留 name, bl_idname
     ROOT_BLACKLIST = {
         'location', 'location_absolute', 'width', 'height', 'color', 'use_custom_color', 
         'select', 'hide', 'bl_icon', 'bl_width_default', 'bl_width_min', 'bl_width_max',
         'bl_height_default', 'bl_height_min', 'bl_height_max', 'mute'
     }
     
-    # [v5.14.62] Properties字典黑名单: 清理 UI 垃圾及已经存在于根层级的重复项
     PROPS_BLACKLIST = {
-        'name', 'bl_idname', 'label', 'mute', # 根层级已有，此处剔除
+        'name', 'bl_idname', 'label', 'mute', 
         'show_options', 'show_preview', 'show_texture', 'bl_label', 'shrink', 'label_size',
         'active_index', 'active_item', 'active_input_index', 'active_generation_index', 'active_main_index',
         'inspection_index', 'warning_propagation', 'bl_description',
         'location', 'location_absolute', 'width', 'height', 'color', 'use_custom_color', 
-        'select', 'hide', 'bl_icon'
+        'select', 'hide', 'bl_icon', 'socket_idname'
     }
 
     SOCKET_PROP_BLACKLIST = {
@@ -76,16 +100,13 @@ class CompactFilter:
     def process_node(node_data):
         is_frame = node_data.get('bl_idname') == 'NodeFrame'
         
-        # 1. 剔除多余的 parent
         if 'parent' in node_data:
             del node_data['parent']
             
-        # 2. 根层级清理
         for key in list(node_data.keys()):
             if key in CompactFilter.ROOT_BLACKLIST:
                 del node_data[key]
                 
-        # 3. Properties 字典深度清理
         if 'properties' in node_data:
             props = node_data['properties']
             for key in list(props.keys()):
@@ -93,21 +114,17 @@ class CompactFilter:
                     del props[key]
                 elif isinstance(props[key], str) and props[key].startswith('<bpy_struct'): 
                     del props[key]
-            # 若为空则抹除
             if not props:
                 del node_data['properties']
                 
-        # 4. 插槽清理
         for direction in ['inputs', 'outputs']:
             if direction in node_data:
                 for socket in node_data[direction]:
                     CompactFilter._process_socket(socket)
                 
-                # 输出端默认不需要，除非有特殊连线需求(极简模式下直接剔除)
                 if direction == 'outputs' or not node_data[direction]:
                     del node_data[direction]
 
-        # 5. Zone 状态清理
         for state_key in ['simulation_state', 'repeat_state', 'bake_state', 'foreach_main', 'foreach_input', 'foreach_generation']:
             if state_key in node_data:
                 for item in node_data[state_key].get('items', []):
@@ -124,7 +141,7 @@ class CompactFilter:
             del socket_data['identifier']
 
 # ==============================================================================
-# 3. 序列化逻辑
+# 4. 序列化逻辑
 # ==============================================================================
 
 class SocketSerializer:
@@ -212,7 +229,6 @@ class NodeSerializer:
 
         data['properties'] = NodeSerializer._serialize_properties(node)
 
-        # Zone States
         if node.bl_idname in ('GeometryNodeSimulationInput', 'GeometryNodeSimulationOutput'):
             data['simulation_state'] = NodeSerializer._serialize_zone_state(node, 'state_items')
         elif node.bl_idname in ('GeometryNodeRepeatInput', 'GeometryNodeRepeatOutput'):
@@ -220,7 +236,6 @@ class NodeSerializer:
         elif node.bl_idname in ('GeometryNodeBakeInput', 'GeometryNodeBakeOutput'):
             data['bake_state'] = NodeSerializer._serialize_zone_state(node, 'bake_items')
         
-        # Foreach Zone
         elif node.bl_idname in ('GeometryNodeForeachGeometryElementInput', 'GeometryNodeForeachGeometryElementOutput'):
             NodeSerializer._serialize_foreach_stats(node, data)
 
@@ -330,41 +345,58 @@ class SerializationEngine:
         return list(final_set)
 
     def execute(self):
-        node_names = {n.name for n in self.nodes_to_process}
+        # [v5.14.74 核心优化] 在导出队列中彻底剔除 Reroute 节点
+        real_nodes_to_process = [n for n in self.nodes_to_process if n.bl_idname != 'NodeReroute']
+        node_names = {n.name for n in real_nodes_to_process}
+        
         links_data = []
+        processed_links = set()
         
         for link in self.tree.links:
-            if link.from_node.name in node_names and link.to_node.name in node_names:
-                link_data = {
-                    'src': link.from_node.name,
-                    'src_sock': getattr(link.from_socket, 'identifier', link.from_socket.name),
-                    'dst': link.to_node.name,
-                    'dst_sock': getattr(link.to_socket, 'identifier', link.to_socket.name)
-                }
+            # 起点必须在选区内，且不能是转接点（转接点的连线已由上游节点穿透时顺带处理完毕）
+            if link.from_node.bl_idname == 'NodeReroute' or link.from_node.name not in node_names:
+                continue
                 
-                if not self.compact:
-                    link_data['from_node'] = link_data.pop('src')
-                    link_data['from_socket'] = link_data.pop('src_sock')
-                    link_data['from_socket_index'] = self._get_socket_index(link.from_node.outputs, link.from_socket)
-                    link_data['to_node'] = link_data.pop('dst')
-                    link_data['to_socket'] = link_data.pop('dst_sock')
-                    link_data['to_socket_index'] = self._get_socket_index(link.to_node.inputs, link.to_socket)
-                
-                links_data.append(link_data)
-                
-                if self.compact:
-                    self.connected_sockets.add((link.to_node.name, link.to_socket.identifier))
-                    self.connected_sockets.add((link.to_node.name, link.to_socket.name))
+            # [核心机制] 从当前真实节点出发，穿透中间所有的转接点，直达真正的目标节点
+            real_dests = TopologyTracer.get_real_destinations(link.to_socket)
+            
+            for dest_sock in real_dests:
+                if dest_sock.node.name in node_names:
+                    link_id = (link.from_socket.as_pointer(), dest_sock.as_pointer())
+                    
+                    if link_id not in processed_links:
+                        processed_links.add(link_id)
+                        
+                        link_data = {
+                            'src': link.from_node.name,
+                            'src_sock': getattr(link.from_socket, 'identifier', link.from_socket.name),
+                            'dst': dest_sock.node.name,
+                            'dst_sock': getattr(dest_sock, 'identifier', dest_sock.name)
+                        }
+                        
+                        if not self.compact:
+                            link_data['from_node'] = link_data.pop('src')
+                            link_data['from_socket'] = link_data.pop('src_sock')
+                            link_data['from_socket_index'] = self._get_socket_index(link.from_node.outputs, link.from_socket)
+                            link_data['to_node'] = link_data.pop('dst')
+                            link_data['to_socket'] = link_data.pop('dst_sock')
+                            link_data['to_socket_index'] = self._get_socket_index(dest_sock.node.inputs, dest_sock)
+                        
+                        links_data.append(link_data)
+                        
+                        if self.compact:
+                            self.connected_sockets.add((dest_sock.node.name, getattr(dest_sock, 'identifier', dest_sock.name)))
+                            self.connected_sockets.add((dest_sock.node.name, dest_sock.name))
 
         data = {
-            "version": "v5.14.62 Ultra-Compact",
+            "version": "v5.14.74 Ultra-Compact Reroute-Bypass",
             "tree_type": self.tree.bl_idname,
             "nodes": [],
             "links": links_data,
             "frames": {}
         }
 
-        for node in self.nodes_to_process:
+        for node in real_nodes_to_process:
             try:
                 node_data = NodeSerializer.serialize(node)
                 if self.compact:
@@ -378,7 +410,7 @@ class SerializationEngine:
             except Exception as e:
                 logger.error(f"Serialize error {node.name}: {e}")
 
-        for node in self.nodes_to_process:
+        for node in real_nodes_to_process:
             if node.parent and node.parent.name in node_names:
                 data["frames"][node.name] = node.parent.name
 

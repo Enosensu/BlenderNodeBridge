@@ -1,8 +1,7 @@
 # core/deserializer.py
-# GeoNeural Bridge v5.14.72 (The Ultimate Polymorphic Engine)
-# 架构突破: 废除硬编码映射字典。将“多态清洗”与“词序无关匹配”同时应用于底层 API Identifier 与顶层 UI Name。
-# 理由: 彻底解决 AI 基于 UI 名称臆测枚举值的乱序、变体问题，实现最高级别的架构通用性。
-# 流程: Topology First -> Heal -> Pair (Ledger) -> Props (Dual-Track Fuzzy Enum) -> Inputs -> Links -> Update
+# GeoNeural Bridge v5.14.73 (The Reroute Linker)
+# 机制优化: 修复 NodeReroute (转接点) 初始状态下插槽为 Virtual 导致连线失败的问题。
+# 架构: Topology First -> Heal -> Pair -> Props -> Inputs -> Links (Virtual Socket Tolerant) -> Update
 
 import bpy
 import logging
@@ -18,7 +17,7 @@ except ImportError:
 logger = logging.getLogger("GeoNeuralBridge.deserializer")
 
 # ==============================================================================
-# 1. 智能属性设置器 (双轨多态匹配引擎)
+# 1. 智能属性设置器
 # ==============================================================================
 
 class SmartPropertySetter:
@@ -64,13 +63,11 @@ class SmartPropertySetter:
 
     @staticmethod
     def _set_enum_fuzzy(node, prop_name, value, rna_prop):
-        """
-        [v5.14.72 终极重构] 双轨多态解析引擎 (Dual-Track Polymorphic Resolver)
-        同时对比枚举项的 API identifier 和 UI name，通过纯算法解决所有缩写、别名、乱序问题。
-        """
-        enum_items = rna_prop.enum_items
+        valid_items = [item.identifier for item in rna_prop.enum_items]
         
-        # 1. 输入值多态清洗
+        if value in valid_items: 
+            setattr(node, prop_name, value); return True
+        
         val_str = str(value)
         camel_to_snake = re.sub(r'([a-z])([A-Z])', r'\1_\2', val_str)
         norm_val = camel_to_snake.upper().replace(" ", "_").replace("-", "_")
@@ -84,20 +81,16 @@ class SmartPropertySetter:
         best_match_score = 0.0
 
         for item in enum_items:
-            # 提取双轨特征
             ident = item.identifier
             name = item.name
             
-            # 特征清洗
             ident_clean = ident.upper()
             name_clean = name.upper().replace(" ", "_").replace("-", "_")
             
-            # 优先级 1: 精确匹配 (涵盖了 identifier 和清洗后的 UI name)
             if norm_val == ident_clean or norm_val == name_clean:
                 setattr(node, prop_name, ident)
                 return True
                 
-            # 优先级 2: 词序无关匹配 (完美解决 AND_NOT <-> NOT_AND 的问题)
             ident_tokens = get_sorted_tokens(ident_clean)
             name_tokens = get_sorted_tokens(name_clean)
             
@@ -105,7 +98,6 @@ class SmartPropertySetter:
                 setattr(node, prop_name, ident)
                 return True
                 
-            # 记录用于优先级 3 (Difflib) 的最高分
             score_ident = difflib.SequenceMatcher(None, norm_val, ident_clean).ratio()
             score_name = difflib.SequenceMatcher(None, norm_val, name_clean).ratio()
             max_score = max(score_ident, score_name)
@@ -114,7 +106,6 @@ class SmartPropertySetter:
                 best_match_score = max_score
                 best_match_ident = ident
                 
-        # 优先级 3: 终极模糊兜底
         if best_match_score >= 0.6 and best_match_ident:
             setattr(node, prop_name, best_match_ident)
             return True
@@ -135,27 +126,31 @@ class SocketResolver:
             return candidates
 
         if not name_or_ident: return candidates
+        name_str = str(name_or_ident)
+
+        # [v5.14.73 核心修复] Reroute 节点专属放宽逻辑
+        # 如果是 Reroute 节点，它的插槽一开始必定是 NodeSocketVirtual，所以这里允许接纳 Virtual
+        node = collection[0].node if len(collection) > 0 else None
+        is_reroute = node and node.bl_idname == 'NodeReroute'
 
         for s in collection:
             if s.identifier == name_or_ident or s.name == name_or_ident:
-                if s.bl_idname != 'NodeSocketVirtual' and s not in candidates:
+                if (s.bl_idname != 'NodeSocketVirtual' or is_reroute) and s not in candidates:
                     candidates.append(s)
 
         if candidates: return candidates
 
-        name_str = str(name_or_ident)
         name_upper = name_str.strip().upper()
-
         clean = re.sub(r'_\d+$', '', name_str).lower()
         for s in collection:
-            if s.name.lower() == clean and s.bl_idname != 'NodeSocketVirtual' and s not in candidates:
+            if s.name.lower() == clean and (s.bl_idname != 'NodeSocketVirtual' or is_reroute) and s not in candidates:
                 candidates.append(s)
 
         if candidates: return candidates
 
         if name_upper in {'A', 'B', 'C', 'D', 'X', 'Y', 'Z'}:
             idx_map = {'A': 0, 'X': 0, 'B': 1, 'Y': 1, 'C': 2, 'Z': 2, 'D': 3}
-            valid_sockets = [s for s in collection if s.bl_idname != 'NodeSocketVirtual' and not s.hide and s.enabled]
+            valid_sockets = [s for s in collection if (s.bl_idname != 'NodeSocketVirtual' or is_reroute) and not s.hide and s.enabled]
             target_idx = idx_map[name_upper]
             if target_idx < len(valid_sockets):
                 candidates.append(valid_sockets[target_idx])
@@ -182,7 +177,7 @@ class SocketResolver:
         generic_terms = {"VALUE", "RESULT", "OUTPUT", "INPUT", "DATA", "ANY"}
         if name_upper in generic_terms:
             for s in collection:
-                if s.bl_idname != 'NodeSocketVirtual' and not s.hide and s.enabled and s not in candidates:
+                if (s.bl_idname != 'NodeSocketVirtual' or is_reroute) and not s.hide and s.enabled and s not in candidates:
                     candidates.append(s)
 
         return candidates
@@ -205,7 +200,8 @@ class NodeRestorer:
         'interface', 'node_tree', 'color_ramp', 'warning_propagation',
         'bl_label', 'bl_description', 'bl_icon', 'location', 'width', 'height',
         'active_input_index', 'active_main_index', 'active_generation_index',
-        'show_options', 'show_preview', 'show_texture', 'shrink', 'label_size'
+        'show_options', 'show_preview', 'show_texture', 'shrink', 'label_size',
+        'socket_idname' # [v5.14.73 保护] 防止错误尝试写入只读的 socket_idname
     }
 
     @staticmethod
@@ -295,7 +291,11 @@ class NodeRestorer:
         
         for s_data in inputs_data:
             if not isinstance(s_data, dict): continue
-            if s_data.get('identifier') == '__extend__' or s_data.get('bl_socket_idname') == 'NodeSocketVirtual': continue
+            
+            # 兼容 Reroute 等虚拟节点
+            is_virtual_allowed = (node.bl_idname == 'NodeReroute')
+            if s_data.get('identifier') == '__extend__' or (not is_virtual_allowed and s_data.get('bl_socket_idname') == 'NodeSocketVirtual'): 
+                continue
             
             idx = s_data.get('index')
             ident = s_data.get('identifier')
@@ -682,7 +682,9 @@ class DeserializationEngine:
         to_sock = candidates_dst[0] if candidates_dst else None
 
         if not from_sock and len(src.outputs) > 0:
-             from_sock = next((s for s in src.outputs if not s.hide and s.enabled and s.bl_idname != 'NodeSocketVirtual'), None)
+             # 对于 Reroute 输出，允许 Virtual
+             is_src_reroute = src.bl_idname == 'NodeReroute'
+             from_sock = next((s for s in src.outputs if not s.hide and s.enabled and (s.bl_idname != 'NodeSocketVirtual' or is_src_reroute)), None)
 
         if to_sock and to_sock.is_linked and to_idx is None:
             original_name = to_sock.name
