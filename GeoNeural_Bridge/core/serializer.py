@@ -1,7 +1,7 @@
 # core/serializer.py
-# GeoNeural Bridge v5.14.74 (The Reroute-Bypass Optimizer)
-# 架构突破: 引入 TopologyTracer，在导出阶段递归穿透并剔除所有 NodeReroute (转接点)，提取最纯粹的直连拓扑图。
-# 理由: 消除转接点带来的 Virtual Socket 连线断裂风险，并极大降低 AI 分析节点结构的 Token 噪音。
+# GeoNeural Bridge v5.14.75 (Ultra-Compact Clean)
+# 机制优化: 进一步封堵 RNA 属性泄露，彻底过滤 properties 中的 UI 尺寸限界参数 (bl_width_* 等) 和空字符串 label。
+# 架构: Topology Tracer -> Reroute Bypass -> Data Clean -> Compact Filter (Deep RNA Block) -> Output
 
 import bpy
 import logging
@@ -45,7 +45,7 @@ class DataCleaner:
         }
 
 # ==============================================================================
-# 2. 拓扑追踪引擎 (新增解耦层)
+# 2. 拓扑追踪引擎
 # ==============================================================================
 
 class TopologyTracer:
@@ -55,16 +55,13 @@ class TopologyTracer:
         if visited is None:
             visited = set()
         
-        # 防死循环（用户可能连出闭环的转接点）
         if socket in visited:
             return []
         visited.add(socket)
         
-        # 如果命中真实节点，立即返回该插槽
         if socket.node.bl_idname != 'NodeReroute':
             return [socket]
         
-        # 如果命中转接点，顺着它的输出继续递归
         dests = []
         if socket.node.outputs:
             for out_link in socket.node.outputs[0].links:
@@ -72,23 +69,25 @@ class TopologyTracer:
         return dests
 
 # ==============================================================================
-# 3. 极致精简过滤器
+# 3. 极致精简过滤器 (深度清理版)
 # ==============================================================================
 
 class CompactFilter:
     ROOT_BLACKLIST = {
         'location', 'location_absolute', 'width', 'height', 'color', 'use_custom_color', 
-        'select', 'hide', 'bl_icon', 'bl_width_default', 'bl_width_min', 'bl_width_max',
-        'bl_height_default', 'bl_height_min', 'bl_height_max', 'mute'
+        'select', 'hide', 'bl_icon', 'mute'
     }
     
+    # [v5.14.75 核心修复] 彻底封堵底层 RNA 泄露的 UI 限界尺寸参数
     PROPS_BLACKLIST = {
         'name', 'bl_idname', 'label', 'mute', 
         'show_options', 'show_preview', 'show_texture', 'bl_label', 'shrink', 'label_size',
         'active_index', 'active_item', 'active_input_index', 'active_generation_index', 'active_main_index',
         'inspection_index', 'warning_propagation', 'bl_description',
         'location', 'location_absolute', 'width', 'height', 'color', 'use_custom_color', 
-        'select', 'hide', 'bl_icon', 'socket_idname'
+        'select', 'hide', 'bl_icon', 'socket_idname',
+        'bl_width_default', 'bl_width_min', 'bl_width_max',
+        'bl_height_default', 'bl_height_min', 'bl_height_max'
     }
 
     SOCKET_PROP_BLACKLIST = {
@@ -102,6 +101,10 @@ class CompactFilter:
         
         if 'parent' in node_data:
             del node_data['parent']
+            
+        # [v5.14.75] 清除无意义的空标签，节省 Token
+        if node_data.get('label') == "":
+            del node_data['label']
             
         for key in list(node_data.keys()):
             if key in CompactFilter.ROOT_BLACKLIST:
@@ -345,7 +348,6 @@ class SerializationEngine:
         return list(final_set)
 
     def execute(self):
-        # [v5.14.74 核心优化] 在导出队列中彻底剔除 Reroute 节点
         real_nodes_to_process = [n for n in self.nodes_to_process if n.bl_idname != 'NodeReroute']
         node_names = {n.name for n in real_nodes_to_process}
         
@@ -353,11 +355,9 @@ class SerializationEngine:
         processed_links = set()
         
         for link in self.tree.links:
-            # 起点必须在选区内，且不能是转接点（转接点的连线已由上游节点穿透时顺带处理完毕）
             if link.from_node.bl_idname == 'NodeReroute' or link.from_node.name not in node_names:
                 continue
                 
-            # [核心机制] 从当前真实节点出发，穿透中间所有的转接点，直达真正的目标节点
             real_dests = TopologyTracer.get_real_destinations(link.to_socket)
             
             for dest_sock in real_dests:
@@ -389,7 +389,7 @@ class SerializationEngine:
                             self.connected_sockets.add((dest_sock.node.name, dest_sock.name))
 
         data = {
-            "version": "v5.14.74 Ultra-Compact Reroute-Bypass",
+            "version": "v5.14.75 Ultra-Compact Clean",
             "tree_type": self.tree.bl_idname,
             "nodes": [],
             "links": links_data,
