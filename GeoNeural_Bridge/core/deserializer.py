@@ -1,18 +1,15 @@
 # core/deserializer.py
-# GeoNeural Bridge v5.14.73 (The Reroute Linker)
-# 机制优化: 修复 NodeReroute (转接点) 初始状态下插槽为 Virtual 导致连线失败的问题。
-# 架构: Topology First -> Heal -> Pair -> Props -> Inputs -> Links (Virtual Socket Tolerant) -> Update
+# GeoNeural Bridge v5.14.99 (Pure Executor - Bulletproof Sync)
+# 机制优化: 修正 Zone / Capture 节点使用 ClassName 而非 Enum 导致集合创建退化的灾难错误。
+# 架构: Topology Tracer -> node_mappings(The Brain) -> Node Restore -> Deserialization Engine
 
 import bpy
 import logging
-import re
 import difflib
 from mathutils import Vector, Euler, Matrix, Color, Quaternion
 
-try:
-    from . import node_mappings
-except ImportError:
-    node_mappings = None
+from . import node_mappings
+from .node_mappings import TextSmartEngine, SocketTypeResolver
 
 logger = logging.getLogger("GeoNeuralBridge.deserializer")
 
@@ -21,36 +18,43 @@ logger = logging.getLogger("GeoNeuralBridge.deserializer")
 # ==============================================================================
 
 class SmartPropertySetter:
-    PROP_REMAP = {
-        'domain_type': 'domain',
-        'data_type': 'data_type',      
-        'mode': 'operation',
-        'operation': 'operation',
-        'input_type': 'input_type'
-    }
-
     @staticmethod
-    def resolve_prop_name(name):
-        return SmartPropertySetter.PROP_REMAP.get(name, name)
+    def resolve_prop_name(node, prop_name):
+        if hasattr(node, prop_name): return prop_name
+            
+        semantic_aliases = {'mode': 'operation'}
+        norm_prop = TextSmartEngine.clean_for_loose(prop_name)
+        if norm_prop in semantic_aliases and hasattr(node, semantic_aliases[norm_prop]):
+            return semantic_aliases[norm_prop]
+
+        if hasattr(node, "bl_rna"):
+            best_match = None
+            best_diff = 999
+            for rna_key in node.bl_rna.properties.keys():
+                if TextSmartEngine.match_loose(prop_name, rna_key):
+                    diff = abs(len(rna_key) - len(prop_name))
+                    if diff < best_diff:
+                        best_diff = diff
+                        best_match = rna_key
+            if best_match: return best_match
+            
+        return prop_name
 
     @staticmethod
     def set_property(node, prop_name, value):
-        real_prop_name = SmartPropertySetter.resolve_prop_name(prop_name)
-        
-        if not hasattr(node, real_prop_name):
-            return False 
+        real_prop_name = SmartPropertySetter.resolve_prop_name(node, prop_name)
+        if not hasattr(node, real_prop_name): return False 
 
         try:
             rna_prop = node.bl_rna.properties.get(real_prop_name)
             if rna_prop and rna_prop.is_readonly: return True
 
             if rna_prop and rna_prop.type == 'ENUM' and isinstance(value, str):
-                return SmartPropertySetter._set_enum_fuzzy(node, real_prop_name, value, rna_prop)
+                return SmartPropertySetter._set_enum_smart(node, real_prop_name, value, rna_prop)
 
             current = getattr(node, real_prop_name)
             if isinstance(current, (Vector, Color, Euler)) and isinstance(value, (list, tuple)):
-                if isinstance(current, Color) and len(value) == 3:
-                    value = list(value) + [1.0]
+                if isinstance(current, Color) and len(value) == 3: value = list(value) + [1.0]
                 setattr(node, real_prop_name, type(current)(value))
             elif isinstance(current, Matrix) and isinstance(value, (list, tuple)):
                 mat = Matrix([value[i:i+4] for i in range(0, 16, 4)]) if len(value) == 16 else Matrix(value)
@@ -62,55 +66,34 @@ class SmartPropertySetter:
             return False
 
     @staticmethod
-    def _set_enum_fuzzy(node, prop_name, value, rna_prop):
+    def _set_enum_smart(node, prop_name, value, rna_prop):
         valid_items = [item.identifier for item in rna_prop.enum_items]
-        
         if value in valid_items: 
             setattr(node, prop_name, value); return True
-        
-        val_str = str(value)
-        camel_to_snake = re.sub(r'([a-z])([A-Z])', r'\1_\2', val_str)
-        norm_val = camel_to_snake.upper().replace(" ", "_").replace("-", "_")
-        
-        def get_sorted_tokens(s):
-            return sorted([t for t in s.split('_') if t])
             
-        norm_tokens = get_sorted_tokens(norm_val)
-        
         best_match_ident = None
         best_match_score = 0.0
+        norm_val = TextSmartEngine.clean_polymorphic(value)
 
-        for item in enum_items:
-            ident = item.identifier
-            name = item.name
-            
-            ident_clean = ident.upper()
-            name_clean = name.upper().replace(" ", "_").replace("-", "_")
-            
-            if norm_val == ident_clean or norm_val == name_clean:
-                setattr(node, prop_name, ident)
-                return True
+        for item in rna_prop.enum_items:
+            if TextSmartEngine.match_strict(value, item.identifier) or TextSmartEngine.match_strict(value, item.name):
+                setattr(node, prop_name, item.identifier); return True
                 
-            ident_tokens = get_sorted_tokens(ident_clean)
-            name_tokens = get_sorted_tokens(name_clean)
-            
-            if norm_tokens and (norm_tokens == ident_tokens or norm_tokens == name_tokens):
-                setattr(node, prop_name, ident)
-                return True
-                
+            ident_clean = TextSmartEngine.clean_polymorphic(item.identifier)
+            name_clean = TextSmartEngine.clean_polymorphic(item.name)
             score_ident = difflib.SequenceMatcher(None, norm_val, ident_clean).ratio()
             score_name = difflib.SequenceMatcher(None, norm_val, name_clean).ratio()
-            max_score = max(score_ident, score_name)
             
+            max_score = max(score_ident, score_name)
             if max_score > best_match_score:
                 best_match_score = max_score
-                best_match_ident = ident
+                best_match_ident = item.identifier
                 
         if best_match_score >= 0.6 and best_match_ident:
-            setattr(node, prop_name, best_match_ident)
-            return True
+            setattr(node, prop_name, best_match_ident); return True
             
         return False
+
 
 # ==============================================================================
 # 2. 终极插槽解析引擎
@@ -126,61 +109,55 @@ class SocketResolver:
             return candidates
 
         if not name_or_ident: return candidates
-        name_str = str(name_or_ident)
+        name_str = str(name_or_ident).strip()
 
-        # [v5.14.73 核心修复] Reroute 节点专属放宽逻辑
-        # 如果是 Reroute 节点，它的插槽一开始必定是 NodeSocketVirtual，所以这里允许接纳 Virtual
         node = collection[0].node if len(collection) > 0 else None
         is_reroute = node and node.bl_idname == 'NodeReroute'
 
-        for s in collection:
-            if s.identifier == name_or_ident or s.name == name_or_ident:
-                if (s.bl_idname != 'NodeSocketVirtual' or is_reroute) and s not in candidates:
-                    candidates.append(s)
+        def is_valid_socket(s):
+            return (s.bl_idname != 'NodeSocketVirtual' or is_reroute) and s not in candidates
 
-        if candidates: return candidates
-
-        name_upper = name_str.strip().upper()
-        clean = re.sub(r'_\d+$', '', name_str).lower()
         for s in collection:
-            if s.name.lower() == clean and (s.bl_idname != 'NodeSocketVirtual' or is_reroute) and s not in candidates:
+            if (s.identifier == name_str or s.name == name_str) and is_valid_socket(s):
                 candidates.append(s)
 
         if candidates: return candidates
 
+        for s in collection:
+            if not is_valid_socket(s): continue
+            if (TextSmartEngine.match_loose(name_str, s.name) or 
+                TextSmartEngine.match_loose(name_str, s.identifier) or 
+                TextSmartEngine.match_loose(name_str, getattr(s, 'label', '')) or
+                TextSmartEngine.match_loose(name_str, s.bl_idname)):
+                candidates.append(s)
+
+        if candidates: return candidates
+
+        name_upper = name_str.upper()
         if name_upper in {'A', 'B', 'C', 'D', 'X', 'Y', 'Z'}:
             idx_map = {'A': 0, 'X': 0, 'B': 1, 'Y': 1, 'C': 2, 'Z': 2, 'D': 3}
-            valid_sockets = [s for s in collection if (s.bl_idname != 'NodeSocketVirtual' or is_reroute) and not s.hide and s.enabled]
+            valid_sockets = [s for s in collection if is_valid_socket(s) and not getattr(s, 'hide', False) and getattr(s, 'enabled', True)]
             target_idx = idx_map[name_upper]
             if target_idx < len(valid_sockets):
                 candidates.append(valid_sockets[target_idx])
             return candidates
 
-        type_keywords = {
-            "GEOMETRY": "NodeSocketGeometry", "VECTOR": "NodeSocketVector",
-            "SHADER": "NodeSocketShader", "COLOR": "NodeSocketColor",
-            "IMAGE": "NodeSocketImage", "OBJECT": "NodeSocketObject",
-            "COLLECTION": "NodeSocketCollection", "MATERIAL": "NodeSocketMaterial",
-            "STRING": "NodeSocketString", "ROTATION": "NodeSocketRotation", "MATRIX": "NodeSocketMatrix",
-            "BOOLEAN": "NodeSocketBool", "BOOL": "NodeSocketBool",
-            "INT": "NodeSocketInt", "INTEGER": "NodeSocketInt",
-            "FLOAT": "NodeSocketFloat"
-        }
-        if name_upper in type_keywords:
-            target_id = type_keywords[name_upper]
+        guessed_type = node_mappings.get_socket_class_name(name_str)
+        if guessed_type:
             for s in collection:
-                if s.bl_idname == target_id and not s.hide and s.enabled and s not in candidates:
+                if s.bl_idname == guessed_type and not getattr(s, 'hide', False) and getattr(s, 'enabled', True) and is_valid_socket(s):
                     candidates.append(s)
-        
+                    
         if candidates: return candidates
 
         generic_terms = {"VALUE", "RESULT", "OUTPUT", "INPUT", "DATA", "ANY"}
         if name_upper in generic_terms:
             for s in collection:
-                if (s.bl_idname != 'NodeSocketVirtual' or is_reroute) and not s.hide and s.enabled and s not in candidates:
+                if is_valid_socket(s) and not getattr(s, 'hide', False) and getattr(s, 'enabled', True):
                     candidates.append(s)
 
         return candidates
+
 
 # ==============================================================================
 # 3. 节点恢复器
@@ -201,7 +178,7 @@ class NodeRestorer:
         'bl_label', 'bl_description', 'bl_icon', 'location', 'width', 'height',
         'active_input_index', 'active_main_index', 'active_generation_index',
         'show_options', 'show_preview', 'show_texture', 'shrink', 'label_size',
-        'socket_idname' # [v5.14.73 保护] 防止错误尝试写入只读的 socket_idname
+        'socket_idname'
     }
 
     @staticmethod
@@ -292,7 +269,6 @@ class NodeRestorer:
         for s_data in inputs_data:
             if not isinstance(s_data, dict): continue
             
-            # 兼容 Reroute 等虚拟节点
             is_virtual_allowed = (node.bl_idname == 'NodeReroute')
             if s_data.get('identifier') == '__extend__' or (not is_virtual_allowed and s_data.get('bl_socket_idname') == 'NodeSocketVirtual'): 
                 continue
@@ -339,6 +315,7 @@ class NodeRestorer:
                 if 'hide' in s_data: socket.hide = s_data['hide']
                 if 'hide_value' in s_data: socket.hide_value = s_data['hide_value']
                 assigned_sockets.add(socket)
+
 
 # ==============================================================================
 # 4. 反序列化主引擎
@@ -476,7 +453,8 @@ class DeserializationEngine:
                         for s_data in n_data[direction]:
                             s_name = s_data.get('name', 'Socket')
                             s_type = s_data.get('bl_socket_idname', 'NodeSocketFloat')
-                            api_type = node_mappings.get_api_enum(s_type) if node_mappings else 'FLOAT'
+                            
+                            api_type = node_mappings.get_api_enum(s_type)
                             if api_type != 'VIRTUAL':
                                 try: target_tree.interface.new_socket(s_name, in_out=direction[:-1].upper(), socket_type=api_type)
                                 except: pass
@@ -548,14 +526,17 @@ class DeserializationEngine:
         return outputs + normals + frames
 
     def _create_node_skeleton(self, n_data, offset):
-        bl_idname = n_data.get('bl_idname', 'NodeFrame')
+        raw_idname = n_data.get('bl_idname', 'NodeFrame')
+        bl_idname = node_mappings.resolve_node_idname(raw_idname)
+        
         orig_name = n_data.get('name')
         
         try: 
             node = self.tree.nodes.new(bl_idname)
-        except: 
+        except Exception as e: 
             node = self.tree.nodes.new("NodeFrame")
             node.label = f"MISSING: {bl_idname}"
+            logger.warning(f"Failed to create node {bl_idname}, error: {e}")
         
         if orig_name:
             node.name = orig_name 
@@ -586,7 +567,9 @@ class DeserializationEngine:
             except: pass
             for item in n_data[json_key].get('items', []):
                 name = item.get('name', 'Value'); raw_type = item.get('socket_type', 'FLOAT')
-                api_type = node_mappings.get_api_enum(raw_type) if node_mappings else 'FLOAT'
+                
+                # 【机制隔离】使用 get_api_enum 保证提取到 FLOAT_VECTOR
+                api_type = node_mappings.get_api_enum(raw_type)
                 try: collection.new(api_type, name)
                 except: pass
 
@@ -601,10 +584,11 @@ class DeserializationEngine:
             if isinstance(item, str): name = item; raw_type = 'FLOAT'
             elif isinstance(item, dict): name = item.get('name', 'Value'); raw_type = item.get('socket_type', 'FLOAT')
             else: continue
-            if node_mappings:
-                api_type = node_mappings.get_api_enum(item.get('bl_socket_idname', raw_type))
-            else: api_type = 'FLOAT'
+            
+            # 【机制隔离】严格调用 get_api_enum 防止传入 NodeSocketVector 导致崩溃
+            api_type = node_mappings.get_api_enum(item.get('bl_socket_idname', raw_type))
             if api_type == 'VIRTUAL': continue
+            
             try: collection.new(api_type, name)
             except: 
                 try: collection.new('GEOMETRY', name)
@@ -629,7 +613,9 @@ class DeserializationEngine:
             for item in items_data:
                 name = item.get("name", "Value") if isinstance(item, dict) else item
                 raw_type = item.get("data_type", "FLOAT") if isinstance(item, dict) else "FLOAT"
-                api_type = node_mappings.get_api_enum(raw_type) if node_mappings else raw_type
+                
+                api_type = node_mappings.get_api_enum(raw_type)
+                
                 try: node.capture_items.new(api_type, name)
                 except: 
                     try: node.capture_items.new('FLOAT', name)
@@ -682,9 +668,8 @@ class DeserializationEngine:
         to_sock = candidates_dst[0] if candidates_dst else None
 
         if not from_sock and len(src.outputs) > 0:
-             # 对于 Reroute 输出，允许 Virtual
              is_src_reroute = src.bl_idname == 'NodeReroute'
-             from_sock = next((s for s in src.outputs if not s.hide and s.enabled and (s.bl_idname != 'NodeSocketVirtual' or is_src_reroute)), None)
+             from_sock = next((s for s in src.outputs if not getattr(s, 'hide', False) and getattr(s, 'enabled', True) and (s.bl_idname != 'NodeSocketVirtual' or is_src_reroute)), None)
 
         if to_sock and to_sock.is_linked and to_idx is None:
             original_name = to_sock.name
