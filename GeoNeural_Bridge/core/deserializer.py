@@ -1,7 +1,13 @@
 # core/deserializer.py
-# GeoNeural Bridge v5.14.99 (Pure Executor - Bulletproof Sync)
-# 机制优化: 修正 Zone / Capture 节点使用 ClassName 而非 Enum 导致集合创建退化的灾难错误。
-# 架构: Topology Tracer -> node_mappings(The Brain) -> Node Restore -> Deserialization Engine
+# GeoNeural Bridge v5.14.133 (Omega Armor - Semantic Anchor Pro)
+# 机制优化: 增加对 AI 超紧凑 Dict 格式 inputs 的泛化支持。
+# 机制优化: 增加 input_type -> data_type 的专属语义别名桥接。
+# 架构级强化: 万能集合雷达、焦土重建协议与装甲回退试探器。
+# 漏洞修复: 引入内部填充协议，解决 API 创建 NodeGroup 内部真空的缺陷。
+# 漏洞修复: 引入 [语义绝对优先绑定]，解决动态节点序列化过程中的标识符漂移。
+# 架构级强化: 升级 [全向双写协议 Bidirectional Dual-Write]，同步 Zone 节点数据。
+# 核心修复: 引入 [Pulse-Sync Protocol] 脉冲同步协议，强制刷新 Zone 节点拓扑。
+# 核心修复: 增强 [Link Semantic Anchor]，引入双重故障转移机制，在对抗 Blender 重命名的同时兼容 AI 内部引用不一致。
 
 import bpy
 import logging
@@ -22,7 +28,11 @@ class SmartPropertySetter:
     def resolve_prop_name(node, prop_name):
         if hasattr(node, prop_name): return prop_name
             
-        semantic_aliases = {'mode': 'operation'}
+        semantic_aliases = {
+            'mode': 'operation',
+            'inputtype': 'data_type', 
+            'domaintype': 'domain'
+        }
         norm_prop = TextSmartEngine.clean_for_loose(prop_name)
         if norm_prop in semantic_aliases and hasattr(node, semantic_aliases[norm_prop]):
             return semantic_aliases[norm_prop]
@@ -101,7 +111,7 @@ class SmartPropertySetter:
 
 class SocketResolver:
     @staticmethod
-    def resolve_candidates(collection, name_or_ident, index=None):
+    def resolve_candidates(collection, name_or_ident, index=None, orig_name=None):
         candidates = []
         
         if index is not None and 0 <= index < len(collection):
@@ -116,6 +126,19 @@ class SocketResolver:
 
         def is_valid_socket(s):
             return (s.bl_idname != 'NodeSocketVirtual' or is_reroute) and s not in candidates
+
+        # 【语义绝对优先绑定】
+        # 如果提供了原始名称 (orig_name)，且处于动态 Zone 节点中，
+        # 优先尝试按名称 (Name) 匹配，无视底层标识符 (Identifier) 的差异。
+        # 这解决了 Compact Mode 下标识符漂移 (Item_2 -> Item_5) 导致的断连。
+        if node and orig_name:
+            is_dynamic = any(x in node.bl_idname for x in ['Group', 'Simulation', 'Repeat', 'Bake', 'Foreach'])
+            if is_dynamic:
+                orig_name_str = str(orig_name).strip()
+                for s in collection:
+                    if s.name == orig_name_str and is_valid_socket(s):
+                        candidates.append(s)
+                if candidates: return candidates
 
         for s in collection:
             if (s.identifier == name_str or s.name == name_str) and is_valid_socket(s):
@@ -150,11 +173,21 @@ class SocketResolver:
                     
         if candidates: return candidates
 
-        generic_terms = {"VALUE", "RESULT", "OUTPUT", "INPUT", "DATA", "ANY"}
+        generic_terms = {"VALUE", "RESULT", "OUTPUT", "INPUT", "DATA", "ANY", "ATTRIBUTE"}
         if name_upper in generic_terms:
+            data_sockets = []
+            geo_sockets = []
             for s in collection:
                 if is_valid_socket(s) and not getattr(s, 'hide', False) and getattr(s, 'enabled', True):
-                    candidates.append(s)
+                    if s.type in {'GEOMETRY', 'OBJECT', 'COLLECTION', 'MATERIAL', 'TEXTURE', 'IMAGE'}:
+                        geo_sockets.append(s)
+                    else:
+                        data_sockets.append(s)
+            
+            if data_sockets:
+                candidates.extend(data_sockets)
+            else:
+                candidates.extend(geo_sockets)
 
         return candidates
 
@@ -252,8 +285,16 @@ class NodeRestorer:
 
     @staticmethod
     def restore_socket_defaults(node, inputs_data, node_name=None, links_data=None):
-        if not isinstance(inputs_data, list): return
-        
+        normalized_inputs = []
+        if isinstance(inputs_data, dict):
+            for k, v in inputs_data.items():
+                k_str = str(k)
+                normalized_inputs.append({'identifier': k_str, 'name': k_str, 'default_value': v})
+        elif isinstance(inputs_data, list):
+            normalized_inputs = inputs_data
+        else:
+            return
+            
         will_be_linked = set()
         if node_name and links_data:
             incoming = [l for l in links_data if l.get('to_node') == node_name or l.get('dst') == node_name]
@@ -266,7 +307,7 @@ class NodeRestorer:
 
         assigned_sockets = set()
         
-        for s_data in inputs_data:
+        for s_data in normalized_inputs:
             if not isinstance(s_data, dict): continue
             
             is_virtual_allowed = (node.bl_idname == 'NodeReroute')
@@ -278,7 +319,7 @@ class NodeRestorer:
             name = s_data.get('name')
             
             name_or_ident = ident or name
-            candidates = SocketResolver.resolve_candidates(node.inputs, name_or_ident, idx)
+            candidates = SocketResolver.resolve_candidates(node.inputs, name_or_ident, idx, orig_name=name)
             
             socket = None
             avail = [s for s in candidates if s not in will_be_linked and s not in assigned_sockets]
@@ -326,6 +367,7 @@ class DeserializationEngine:
         self.tree = tree
         self.context = context
         self.node_map = {}
+        self.raw_nodes_map = {}
         self.deferred_props_map = {}
         self._valid_pairs = set()
 
@@ -334,6 +376,11 @@ class DeserializationEngine:
         
         nodes_data = json_data.get("nodes", [])
         if not isinstance(nodes_data, list): nodes_data = []
+        
+        for n in nodes_data:
+            if isinstance(n, dict) and n.get('name'):
+                self.raw_nodes_map[n['name']] = n
+                
         links_data = json_data.get("links", [])
         frames_data = json_data.get("frames", {})
 
@@ -358,33 +405,22 @@ class DeserializationEngine:
             if unassigned:
                 self._propagate_attributes(node, unassigned)
 
-            props = n_data.get('properties', {})
-            capture_items = n_data.get('capture_items_data') or props.get('capture_items_data')
-            legacy_dt = n_data.get('data_type') or props.get('data_type')
+            # 核心数据注入
+            self._radar_restore_collections(node, n_data)
 
-            if capture_items:
-                self._restore_capture_items(node, capture_items)
-            elif legacy_dt and hasattr(node, 'capture_items'):
-                self._adapt_legacy_capture_node(node, legacy_dt)
-
-        for n_data in nodes_data:
-            if not isinstance(n_data, dict): continue
-            node = self.node_map.get(n_data.get('name'))
-            if not node: continue
-
-            for state_key, col_name in [('simulation_state', 'state_items'), 
-                                      ('repeat_state', 'repeat_items'), 
-                                      ('bake_state', 'bake_items')]:
-                if state_key in n_data: self._restore_zone_items(node, n_data[state_key], col_name)
-            
-            if 'foreach_main' in n_data or 'foreach_input' in n_data or 'foreach_generation' in n_data:
-                self._restore_foreach_stats(node, n_data)
+        # ==============================================================================
+        # ⚡ [OMEGA PATCH] 脉冲同步协议 (Pulse-Sync Protocol)
+        # 目的: 消除 Zone 节点数据注入后，Socket 生成前的时序真空
+        # ==============================================================================
+        self._force_topology_refresh() 
+        # ==============================================================================
 
         for n_data in nodes_data:
             if not isinstance(n_data, dict): continue
             name = n_data.get('name')
             node = self.node_map.get(name)
             if not node: continue
+            
             if 'inputs' in n_data: 
                 NodeRestorer.restore_socket_defaults(node, n_data['inputs'], node_name=name, links_data=links_data)
             
@@ -408,6 +444,37 @@ class DeserializationEngine:
 
         for node in self.node_map.values(): node.select = True
         return list(self.node_map.values())
+
+    def _force_topology_refresh(self):
+        """
+        [Omega Armor] 强制 Blender 根据 Items 数据计算并生成 Sockets。
+        这解决了 Simulation/Repeat Zone 自定义接口无法立即连线的问题。
+        """
+        try:
+            # 1. 基础标签更新 (通知 Blender 树结构已脏)
+            if hasattr(self.tree, "update_tag"):
+                self.tree.update_tag()
+            
+            # 2. 强制上下文更新 (这是生成 Zone Sockets 的关键)
+            # 注意: 这是一个昂贵的操作，但对于 Zone 重建是必须的。
+            # 我们通过检测是否存在 Zone 节点来决定是否执行，以优化性能。
+            has_zone = any(
+                "Simulation" in n.bl_idname or 
+                "Repeat" in n.bl_idname or 
+                "Bake" in n.bl_idname or
+                "Foreach" in n.bl_idname 
+                for n in self.node_map.values()
+            )
+            
+            if has_zone and self.context:
+                # 尝试触发视图层更新，迫使 NodeTree 评估
+                # 某些情况下，仅 update_tag 是不够的
+                if hasattr(self.context, "view_layer") and hasattr(self.context.view_layer, "update"):
+                    self.context.view_layer.update()
+                
+                logger.debug("⚡ [Pulse-Sync] Forced topology refresh for Zone Sockets.")
+        except Exception as e:
+            logger.warning(f"⚡ [Pulse-Sync] Refresh warning: {e}")
 
     def _pair_zones(self):
         zone_types = {
@@ -433,8 +500,7 @@ class DeserializationEngine:
                         in_nodes[i].pair_with_output(out_nodes[i])
                         self._valid_pairs.add(in_nodes[i].name)
                         self._valid_pairs.add(out_nodes[i].name)
-                except Exception as e: 
-                    logger.warning(f"Zone pairing failed: {e}")
+                except Exception as e: pass
 
     def _propagate_attributes(self, source_node, props_dict):
         partner = getattr(source_node, "paired_output", None)
@@ -445,21 +511,56 @@ class DeserializationEngine:
         tree_name = n_data.get('node_tree_name')
         if not tree_name: return
         target_tree = bpy.data.node_groups.get(tree_name)
+
+        is_new_tree = False
         if not target_tree:
             try:
                 target_tree = bpy.data.node_groups.new(tree_name, 'GeometryNodeTree')
-                for direction in ['inputs', 'outputs']:
-                    if direction in n_data:
-                        for s_data in n_data[direction]:
-                            s_name = s_data.get('name', 'Socket')
-                            s_type = s_data.get('bl_socket_idname', 'NodeSocketFloat')
-                            
-                            api_type = node_mappings.get_api_enum(s_type)
-                            if api_type != 'VIRTUAL':
-                                try: target_tree.interface.new_socket(s_name, in_out=direction[:-1].upper(), socket_type=api_type)
+                is_new_tree = True
+            except Exception as e:
+                logger.warning(f"Failed to create node tree {tree_name}: {e}")
+                return
+
+        if target_tree:
+            for direction in ['inputs', 'outputs']:
+                if direction in n_data:
+                    for s_data in n_data[direction]:
+                        s_name = s_data.get('name', 'Socket')
+                        raw_type = s_data.get('bl_socket_idname') or s_data.get('type') or 'NodeSocketFloat'
+                        s_type = raw_type if str(raw_type).startswith('NodeSocket') else 'NodeSocketFloat'
+
+                        exists = False
+                        if hasattr(target_tree, "interface"):
+                            in_out = direction[:-1].upper()
+                            for item in target_tree.interface.items_tree:
+                                if item.item_type == 'SOCKET' and item.name == s_name and item.in_out == in_out:
+                                    exists = True
+                                    break
+                            if not exists:
+                                try: target_tree.interface.new_socket(name=s_name, in_out=in_out, socket_type=s_type)
                                 except: pass
-            except: pass
-        if target_tree: node.node_tree = target_tree
+                        else:
+                            collection = getattr(target_tree, direction)
+                            for s in collection:
+                                if s.name == s_name:
+                                    exists = True
+                                    break
+                            if not exists:
+                                try: collection.new(s_type, s_name)
+                                except: pass
+
+            if is_new_tree or len(target_tree.nodes) == 0:
+                try:
+                    if 'Group Input' not in target_tree.nodes:
+                        in_node = target_tree.nodes.new('NodeGroupInput')
+                        in_node.location = (-200, 0)
+                    if 'Group Output' not in target_tree.nodes:
+                        out_node = target_tree.nodes.new('NodeGroupOutput')
+                        out_node.location = (200, 0)
+                except Exception as e:
+                    logger.warning(f"Failed to populate internal IO nodes: {e}")
+
+            node.node_tree = target_tree
 
     def _heal_topology(self, offset):
         zone_pairs = {
@@ -496,23 +597,19 @@ class DeserializationEngine:
 
     def _sync_ghost_node_data(self, ghost_node, ref_node):
         if not ghost_node or not ref_node: return
-        for col_name in ['main_items', 'input_items', 'generation_items']:
+        for col_name in ['main_items', 'input_items', 'generation_items', 'state_items', 'repeat_items', 'bake_items']:
             if hasattr(ref_node, col_name) and hasattr(ghost_node, col_name):
-                src = getattr(ref_node, col_name); dst = getattr(ghost_node, col_name)
-                dst.clear()
+                src = getattr(ref_node, col_name)
+                dst = getattr(ghost_node, col_name)
+                
+                if callable(src) or callable(dst): continue
+                
+                try: dst.clear()
+                except: pass
+                
                 for item in src:
                     s_type = getattr(item, 'socket_type', 'FLOAT')
-                    try: 
-                        new_item = dst.new(s_type, item.name)
-                        if hasattr(item, 'color') and hasattr(new_item, 'color'): new_item.color = item.color
-                    except: pass
-        for col_name in ['state_items', 'repeat_items', 'bake_items']:
-            if hasattr(ref_node, col_name) and hasattr(ghost_node, col_name):
-                src = getattr(ref_node, col_name); dst = getattr(ghost_node, col_name)
-                dst.clear()
-                for item in src:
-                    try: dst.new(getattr(item, 'socket_type', 'FLOAT'), item.name)
-                    except: pass
+                    self._robust_new_item(dst, s_type, item.name)
 
     def _sort_priority(self, nodes_data):
         zone_outputs = {'GeometryNodeSimulationOutput', 'GeometryNodeRepeatOutput', 'GeometryNodeBakeOutput', 'GeometryNodeForeachGeometryElementOutput'}
@@ -556,71 +653,127 @@ class DeserializationEngine:
         if 'width' in n_data: node.width = n_data['width']
         if 'height' in n_data: node.height = n_data['height']
 
-    def _restore_foreach_stats(self, node, n_data):
-        if node.name not in self._valid_pairs: return
-        
-        mappings = [('main_items', 'foreach_main'), ('input_items', 'foreach_input'), ('generation_items', 'foreach_generation')]
-        for col_name, json_key in mappings:
-            if not hasattr(node, col_name) or json_key not in n_data: continue
-            collection = getattr(node, col_name)
-            try: collection.clear()
-            except: pass
-            for item in n_data[json_key].get('items', []):
-                name = item.get('name', 'Value'); raw_type = item.get('socket_type', 'FLOAT')
-                
-                # 【机制隔离】使用 get_api_enum 保证提取到 FLOAT_VECTOR
-                api_type = node_mappings.get_api_enum(raw_type)
-                try: collection.new(api_type, name)
-                except: pass
+    # --------------------------------------------------------------------------
+    # 核心装甲防御区 (Armor Defense Mechanisms)
+    # --------------------------------------------------------------------------
 
-    def _restore_zone_items(self, node, state_data, collection_name):
-        if node.name not in self._valid_pairs: return
+    def _radar_restore_collections(self, node, n_data):
+        """【万能集合雷达】：无视硬编码，自动探测节点自带集合并灌入数据"""
+        radar_map = {
+            'capture_items_data': 'capture_items',
+            'simulation_state': 'state_items',
+            'repeat_state': 'repeat_items',
+            'bake_state': 'bake_items',
+            'foreach_main': 'main_items',
+            'foreach_input': 'input_items',
+            'foreach_generation': 'generation_items'
+        }
         
-        if not hasattr(node, collection_name) or not isinstance(state_data, dict): return
-        collection = getattr(node, collection_name)
-        try: collection.clear()
-        except: pass
-        for item in state_data.get('items', []):
-            if isinstance(item, str): name = item; raw_type = 'FLOAT'
-            elif isinstance(item, dict): name = item.get('name', 'Value'); raw_type = item.get('socket_type', 'FLOAT')
-            else: continue
+        n_data_virtual = n_data.copy()
+        props = n_data_virtual.get('properties', {})
+        if 'capture_items_data' in props:
+            n_data_virtual['capture_items_data'] = props['capture_items_data']
+
+        if 'capture_items_data' not in n_data_virtual and hasattr(node, 'capture_items') and not callable(getattr(node, 'capture_items')):
+            legacy_dt = n_data_virtual.get('data_type') or props.get('data_type')
+            if legacy_dt:
+                self._adapt_legacy_capture_node(node, legacy_dt)
+                return
+
+        for json_key, col_alias in radar_map.items():
+            if json_key in n_data_virtual:
+                items_data = n_data_virtual[json_key]
+                if isinstance(items_data, dict): 
+                    items_data = items_data.get('items', [])
+                
+                target_nodes = [node]
+                
+                # 【双向查找协议】：无论给的是 Input 还是 Output，都能顺藤摸瓜找到另一半
+                if 'Input' in node.bl_idname and hasattr(node, 'paired_output') and node.paired_output:
+                    if node.paired_output not in target_nodes:
+                        target_nodes.insert(0, node.paired_output) # Output 优先（Master）
+                elif 'Output' in node.bl_idname:
+                    # 反向查找：遍历当前图谱，寻找哪个 Input 的 paired_output 是当前节点
+                    for sibling in self.node_map.values():
+                        if 'Input' in sibling.bl_idname and getattr(sibling, 'paired_output', None) == node:
+                            if sibling not in target_nodes:
+                                target_nodes.append(sibling) # Input 延后（Proxy）
+                            break
+                
+                for t_node in target_nodes:
+                    target_col_name = None
+                    if hasattr(t_node, col_alias) and not callable(getattr(t_node, col_alias)):
+                        target_col_name = col_alias
+                    else:
+                        fallback_cols = ['repeat_items', 'state_items', 'bake_items', 'capture_items', 'main_items', 'input_items', 'generation_items']
+                        for fc in fallback_cols:
+                            if hasattr(t_node, fc) and not callable(getattr(t_node, fc)):
+                                target_col_name = fc
+                                break
+                    
+                    if target_col_name:
+                        collection = getattr(t_node, target_col_name)
+                        self._scorched_earth_rebuild(collection, items_data)
+                        # 不触发 break，对目标列表执行完美双写 (Dual-Write)
+
+    def _scorched_earth_rebuild(self, collection, items_data):
+        """【焦土重建协议】：先拔除所有系统幽灵占位符，再重构数据"""
+        if not isinstance(items_data, list): return
+        
+        try:
+            collection.clear()
+        except Exception:
+            try:
+                while len(collection) > 0: 
+                    collection.remove(collection[0])
+            except Exception: pass
+
+        for item in items_data:
+            name = "Value"
+            raw_type = "FLOAT"
+            if isinstance(item, str):
+                name = item
+            elif isinstance(item, dict):
+                name = item.get('name', 'Value')
+                raw_type = item.get('data_type') or item.get('socket_type') or item.get('bl_socket_idname') or 'FLOAT'
             
-            # 【机制隔离】严格调用 get_api_enum 防止传入 NodeSocketVector 导致崩溃
-            api_type = node_mappings.get_api_enum(item.get('bl_socket_idname', raw_type))
-            if api_type == 'VIRTUAL': continue
-            
-            try: collection.new(api_type, name)
-            except: 
-                try: collection.new('GEOMETRY', name)
-                except: pass
+            self._robust_new_item(collection, raw_type, name)
+
+    def _robust_new_item(self, collection, raw_type, name):
+        """【装甲回退试探器】：免疫 API Enum 断层与精神分裂"""
+        api_type = node_mappings.get_api_enum(raw_type)
+        fallbacks = [api_type]
+        
+        target_upper = str(raw_type).upper()
+        if "COLOR" in target_upper or "RGBA" in target_upper:
+            fallbacks.extend(['FLOAT_COLOR', 'COLOR', 'RGBA', 'FLOAT'])
+        elif "VECTOR" in target_upper:
+            fallbacks.extend(['FLOAT_VECTOR', 'VECTOR', 'FLOAT'])
+        elif "INT" in target_upper:
+            fallbacks.extend(['INT', 'FLOAT'])
+        
+        fallbacks.extend(['FLOAT', 'GEOMETRY'])
+        
+        for f_type in fallbacks:
+            try:
+                item = collection.new(f_type, name)
+                if item: return item
+            except Exception:
+                pass
+        return None
 
     def _adapt_legacy_capture_node(self, node, data_type_str):
         try:
-            node.capture_items.clear()
-            api_type = 'FLOAT' 
-            if 'VECTOR' in data_type_str.upper(): api_type = 'FLOAT_VECTOR'
-            elif 'COLOR' in data_type_str.upper(): api_type = 'FLOAT_COLOR'
-            elif 'INT' in data_type_str.upper(): api_type = 'INT'
-            elif 'BOOL' in data_type_str.upper(): api_type = 'BOOLEAN'
-            elif 'ROT' in data_type_str.upper(): api_type = 'ROTATION'
-            node.capture_items.new(api_type, "Value")
+            try: node.capture_items.clear()
+            except: pass
+            
+            api_type = node_mappings.get_api_enum(data_type_str)
+            self._robust_new_item(node.capture_items, api_type, "Attribute")
         except: pass
 
-    def _restore_capture_items(self, node, items_data):
-        if not hasattr(node, 'capture_items') or not isinstance(items_data, list): return
-        try:
-            node.capture_items.clear()
-            for item in items_data:
-                name = item.get("name", "Value") if isinstance(item, dict) else item
-                raw_type = item.get("data_type", "FLOAT") if isinstance(item, dict) else "FLOAT"
-                
-                api_type = node_mappings.get_api_enum(raw_type)
-                
-                try: node.capture_items.new(api_type, name)
-                except: 
-                    try: node.capture_items.new('FLOAT', name)
-                    except: pass
-        except: pass
+    # --------------------------------------------------------------------------
+    # 连接恢复器 
+    # --------------------------------------------------------------------------
 
     def _restore_links(self, links_data):
         if not isinstance(links_data, list): return
@@ -655,16 +808,38 @@ class DeserializationEngine:
             self._heal_dead_links(dead_links, connected_sources, connected_destinations)
 
     def _create_single_link(self, src, dst, link):
-        from_sock_name = link.get('src_sock') or link.get('from_socket')
-        to_sock_name = link.get('dst_sock') or link.get('to_socket')
-        
+        from_sock_ident = link.get('src_sock') or link.get('from_socket')
+        to_sock_ident = link.get('dst_sock') or link.get('to_socket')
         from_idx = link.get('src_idx') or link.get('from_socket_index')
         to_idx = link.get('dst_idx') or link.get('to_socket_index')
 
-        candidates_src = SocketResolver.resolve_candidates(src.outputs, from_sock_name, from_idx)
+        # 【核心修复 - Omega Armor Semantic Anchor】
+        # 双重故障转移机制 (Double Failover Strategy):
+        # 1. 优先使用 JSON 中的原始名称 (src_orig_name) 查找数据，以对抗 Blender 强制重命名 (.001)。
+        # 2. 如果原始名称查找失败（例如 AI 内部引用不一致），回退到 Blender 实际对象名 (src.name) 查找。
+        src_orig_name = link.get('src') or link.get('from_node')
+        dst_orig_name = link.get('dst') or link.get('to_node')
+
+        src_data = self.raw_nodes_map.get(src_orig_name)
+        if not src_data: src_data = self.raw_nodes_map.get(src.name, {}) # Failover
+
+        dst_data = self.raw_nodes_map.get(dst_orig_name)
+        if not dst_data: dst_data = self.raw_nodes_map.get(dst.name, {}) # Failover
+        
+        def get_orig_name(node_data, ident):
+            if not node_data: return None
+            for s in node_data.get('outputs', []) + node_data.get('inputs', []):
+                if s.get('identifier') == ident:
+                    return s.get('name')
+            return None
+
+        from_orig_name = get_orig_name(src_data, from_sock_ident)
+        to_orig_name = get_orig_name(dst_data, to_sock_ident)
+
+        candidates_src = SocketResolver.resolve_candidates(src.outputs, from_sock_ident, from_idx, orig_name=from_orig_name)
         from_sock = candidates_src[0] if candidates_src else None
         
-        candidates_dst = SocketResolver.resolve_candidates(dst.inputs, to_sock_name, to_idx)
+        candidates_dst = SocketResolver.resolve_candidates(dst.inputs, to_sock_ident, to_idx, orig_name=to_orig_name)
         to_sock = candidates_dst[0] if candidates_dst else None
 
         if not from_sock and len(src.outputs) > 0:
@@ -679,11 +854,20 @@ class DeserializationEngine:
                     to_sock = other_sock
                     break
 
+        # === [DIAGNOSTIC PROBE] 诊断探针 ===
+        if not to_sock and "Simulation" in dst.bl_idname:
+            logger.warning(f"❌ [Link-Trace] Failed to find target socket on {dst.name}")
+            logger.warning(f"   Target: '{to_sock_ident}' (Index: {to_idx})")
+            logger.warning(f"   Available Sockets: {[s.name for s in dst.inputs]}")
+        # ===================================
+
         if from_sock and to_sock:
             try: 
                 self.tree.links.new(from_sock, to_sock)
                 return True
-            except: pass
+            except Exception as e:
+                logger.warning(f"⚠️ Blender Refused Link: {src.name} -> {dst.name} ({e})")
+                pass
         return False
 
     def _heal_dead_links(self, dead_links, connected_sources, connected_destinations):

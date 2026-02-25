@@ -1,14 +1,31 @@
 # core/node_mappings.py
-# GeoNeural Bridge v5.14.99 (The Brain Protocol - Absolute Priority)
-# 修复: 增加上下文优先级 (Shader > Geometry)，防止 CompositorNode 截胡导致创建失败。
-# 修复: 适配 Blender 4.0 规范，get_api_enum 精确返回 FLOAT_VECTOR 等标准枚举。
+# GeoNeural Bridge v5.14.111 (Deep Reflection & Core Semantic Difflib)
+# 修复: 引入递归子类扫描 _get_all_subclasses，彻底解决 dir(bpy.types) 带来的类名漏算问题。
+# 修复: 剥离无意义前缀后进行 Difflib 比对，防止 FunctionNode 前缀膨胀导致的节点突变误判。
 
 import bpy
 import difflib
 import re
 
 # ==============================================================================
-# 0. 全局智能文本引擎 (The Brain)
+# 0. 底层工具：递归反射引擎 (Deep Reflection Engine)
+# ==============================================================================
+
+def _get_all_subclasses(cls):
+    """递归获取所有深层子类，无死角扫描 Blender 内存，替代不可靠的 dir()"""
+    all_sub = set()
+    stack = [cls]
+    while stack:
+        current = stack.pop()
+        for sub in current.__subclasses__():
+            if sub not in all_sub:
+                all_sub.add(sub)
+                stack.append(sub)
+    return all_sub
+
+
+# ==============================================================================
+# 1. 全局智能文本引擎 (The Brain)
 # ==============================================================================
 
 class TextSmartEngine:
@@ -17,7 +34,6 @@ class TextSmartEngine:
         """动态剥离 Blender 常见的底层 API 前缀/后缀，提取核心语义"""
         s = str(text).upper()
         prev = ""
-        # 循环递归剥离，确保 NODE_SOCKET_ 这种多重前缀被彻底清理
         while s != prev:
             prev = s
             s = re.sub(r'^((NODE|SOCKET|GEOMETRY|SHADER|FUNCTION|COMPOSITOR|TEXTURE)_?)+', '', s)
@@ -69,7 +85,7 @@ class TextSmartEngine:
 
 
 # ==============================================================================
-# 1. 动态插槽反射器 (Type Safety via Reflection)
+# 2. 动态插槽反射器 (Type Safety via Deep Reflection)
 # ==============================================================================
 
 class SocketTypeResolver:
@@ -79,9 +95,10 @@ class SocketTypeResolver:
     @classmethod
     def _build_cache(cls):
         if cls._CACHE_BUILT: return
-        for type_name in dir(bpy.types):
-            if type_name.startswith("NodeSocket") and "Interface" not in type_name:
-                cls._SOCKET_CACHE[type_name.upper()] = type_name
+        # 使用完美的递归子类扫描获取所有合法 Socket
+        for socket_cls in _get_all_subclasses(bpy.types.NodeSocket):
+            if hasattr(socket_cls, "bl_idname") and socket_cls.bl_idname:
+                cls._SOCKET_CACHE[socket_cls.bl_idname.upper()] = socket_cls.bl_idname
         cls._CACHE_BUILT = True
 
     @classmethod
@@ -89,12 +106,10 @@ class SocketTypeResolver:
         if not cls._CACHE_BUILT: cls._build_cache()
         enum_str = str(enum_type).strip().upper()
         
-        # 1. Token 宽松匹配查找
         for bl_idname in cls._SOCKET_CACHE.values():
             if TextSmartEngine.match_loose(enum_str, bl_idname):
                 return bl_idname
                 
-        # 2. 极端语义兜底
         fallback_map = {
             'VALUE': 'NodeSocketFloat', 'FLOAT': 'NodeSocketFloat',
             'FLOAT_VECTOR': 'NodeSocketVector', 'VECTOR': 'NodeSocketVector',
@@ -107,9 +122,7 @@ class SocketTypeResolver:
 
     @classmethod
     def get_api_enum(cls, class_name_or_type):
-        """【歧义修正】精确返回 Blender 4.0 Zone/Capture 所需的特定短枚举"""
         raw = str(class_name_or_type).strip().upper()
-        
         if "COLOR" in raw or "RGBA" in raw: return "FLOAT_COLOR"
         if "VECTOR" in raw: return "FLOAT_VECTOR"
         if "BOOL" in raw: return "BOOLEAN"
@@ -127,7 +140,7 @@ class SocketTypeResolver:
 
 
 # ==============================================================================
-# 2. 动态节点数据库与名称解析器 (Priority Architecture)
+# 3. 动态节点数据库与名称解析器 (Semantic Difflib & Priority)
 # ==============================================================================
 
 class NodeNameMatcher:
@@ -137,27 +150,16 @@ class NodeNameMatcher:
     @classmethod
     def _build_cache(cls):
         if cls._CACHE_BUILT: return
-        for type_name in dir(bpy.types):
-            if ("Node" in type_name or type_name.endswith("Node")) and not type_name.startswith("NodeSocket") and not type_name.startswith("NodeTree"):
-                try:
-                    cls_obj = getattr(bpy.types, type_name)
-                    if hasattr(cls_obj, 'bl_idname'):
-                        bid = cls_obj.bl_idname
-                        cls._CLASS_ID_CACHE[bid] = bid
-                except: pass
+        # 使用完美的递归子类扫描获取所有合法 Node
+        for node_cls in _get_all_subclasses(bpy.types.Node):
+            if hasattr(node_cls, "bl_idname") and node_cls.bl_idname:
+                cls._CLASS_ID_CACHE[node_cls.bl_idname] = node_cls.bl_idname
                 
-        # 预设骨干护城河，防止极少数情况下的类名加载异常
-        cls._CLASS_ID_CACHE["ShaderNodeMath"] = "ShaderNodeMath"
-        cls._CLASS_ID_CACHE["ShaderNodeVectorMath"] = "ShaderNodeVectorMath"
-        cls._CLASS_ID_CACHE["ShaderNodeMix"] = "ShaderNodeMix"
-        cls._CLASS_ID_CACHE["FunctionNodeBooleanMath"] = "FunctionNodeBooleanMath"
         cls._CLASS_ID_CACHE["NodeFrame"] = "NodeFrame"
         cls._CACHE_BUILT = True
 
     @classmethod
     def _prioritize(cls, matches):
-        """【核心防御】解决 CompositorNode 截胡导致在 GeoNode 创建失败的致命问题"""
-        # ShaderNode 优先级最高，因为 GeoNode 的核心 Math 实际上借用了 ShaderNode
         for prefix in ['ShaderNode', 'GeometryNode', 'FunctionNode']:
             for m in matches:
                 if m.startswith(prefix): return m
@@ -168,10 +170,10 @@ class NodeNameMatcher:
         if not fuzzy_name: return "NodeFrame"
         if not cls._CACHE_BUILT: cls._build_cache()
         
-        # 0. 极速通道 (最常见的 AI 别名直接放行，O(1) 效率)
         fast_path = {
             "MATH": "ShaderNodeMath", "VECTOR_MATH": "ShaderNodeVectorMath",
-            "MIX": "ShaderNodeMix", "BOOLEAN_MATH": "FunctionNodeBooleanMath"
+            "MIX": "ShaderNodeMix", "BOOLEAN_MATH": "FunctionNodeBooleanMath",
+            "COMPARE": "FunctionNodeCompare"
         }
         clean_name = TextSmartEngine.clean_polymorphic(fuzzy_name)
         if clean_name in fast_path: return fast_path[clean_name]
@@ -180,8 +182,9 @@ class NodeNameMatcher:
         if fuzzy_name in cls._CLASS_ID_CACHE:
             return cls._CLASS_ID_CACHE[fuzzy_name]
             
-        # 2. 核心语义精确匹配 (无视前缀)
         norm_fuzzy = TextSmartEngine.strip_blender_api_prefix(fuzzy_name)
+        
+        # 2. 核心语义精确匹配
         matches_exact = [bid for bid in cls._CLASS_ID_CACHE.keys() if norm_fuzzy == TextSmartEngine.strip_blender_api_prefix(bid)]
         if matches_exact: return cls._prioritize(matches_exact)
         
@@ -189,16 +192,27 @@ class NodeNameMatcher:
         matches_sub = [bid for bid in cls._CLASS_ID_CACHE.keys() if TextSmartEngine.match_subset(fuzzy_name, bid)]
         if matches_sub: return cls._prioritize(matches_sub)
         
-        # 4. 容错拼写纠正
-        keys = list(cls._CLASS_ID_CACHE.keys())
-        matches_diff = difflib.get_close_matches(fuzzy_name, keys, n=1, cutoff=0.6)
-        if matches_diff: return cls._CLASS_ID_CACHE[matches_diff[0]]
+        # 4. 【机制核心修复】纯粹核心语义拼写纠错 (免疫前缀膨胀陷阱)
+        # 将所有缓存节点剥离前缀，建立 {纯净语义: [原始ID列表]} 的映射表
+        core_dict = {}
+        for bid in cls._CLASS_ID_CACHE.keys():
+            stripped = TextSmartEngine.strip_blender_api_prefix(bid)
+            if stripped not in core_dict:
+                core_dict[stripped] = []
+            core_dict[stripped].append(bid)
+            
+        # 让 "COMPARE" 去和 "BOOLEAN_MATH" 比拼，而不是 "FunctionNodeCompare"
+        matches_diff = difflib.get_close_matches(norm_fuzzy, list(core_dict.keys()), n=1, cutoff=0.75)
+        if matches_diff:
+            best_stripped = matches_diff[0]
+            # 若有多个节点(如 ShaderNodeMath/TextureNodeMath)共用同一核心语义，交给优先级器裁决
+            return cls._prioritize(core_dict[best_stripped])
             
         return fuzzy_name
 
 
 # ==============================================================================
-# 3. 模块级公开 API
+# 4. 模块级公开 API
 # ==============================================================================
 
 def get_socket_class_name(enum_type):

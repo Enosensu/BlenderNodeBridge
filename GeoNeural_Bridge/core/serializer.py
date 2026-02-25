@@ -1,7 +1,8 @@
 # core/serializer.py
-# GeoNeural Bridge v5.14.75 (Ultra-Compact Clean)
-# 机制优化: 进一步封堵 RNA 属性泄露，彻底过滤 properties 中的 UI 尺寸限界参数 (bl_width_* 等) 和空字符串 label。
-# 架构: Topology Tracer -> Reroute Bypass -> Data Clean -> Compact Filter (Deep RNA Block) -> Output
+# GeoNeural Bridge v5.14.129 (Omega Armor - Universal Extraction Radar)
+# 机制优化: 进一步封堵 RNA 属性泄露，彻底过滤 properties 中的 UI 尺寸限界参数和空字符串 label。
+# 架构级强化: 废除硬编码的 if-elif Zone 节点类型判定，引入【万能探针提取器】，实现对未知/未来版本动态节点的自动化数据抓取。
+# 架构: Topology Tracer -> Reroute Bypass -> Data Clean -> Compact Filter -> Output
 
 import bpy
 import logging
@@ -78,7 +79,6 @@ class CompactFilter:
         'select', 'hide', 'bl_icon', 'mute'
     }
     
-    # [v5.14.75 核心修复] 彻底封堵底层 RNA 泄露的 UI 限界尺寸参数
     PROPS_BLACKLIST = {
         'name', 'bl_idname', 'label', 'mute', 
         'show_options', 'show_preview', 'show_texture', 'bl_label', 'shrink', 'label_size',
@@ -102,7 +102,6 @@ class CompactFilter:
         if 'parent' in node_data:
             del node_data['parent']
             
-        # [v5.14.75] 清除无意义的空标签，节省 Token
         if node_data.get('label') == "":
             del node_data['label']
             
@@ -128,10 +127,12 @@ class CompactFilter:
                 if direction == 'outputs' or not node_data[direction]:
                     del node_data[direction]
 
-        for state_key in ['simulation_state', 'repeat_state', 'bake_state', 'foreach_main', 'foreach_input', 'foreach_generation']:
-            if state_key in node_data:
-                for item in node_data[state_key].get('items', []):
-                    if 'color' in item: del item['color']
+        # 【泛化清洗协议】不再依赖硬编码字典，只要发现节点属性中有 'items' 结构，统一剥离视觉色块
+        for key, val in node_data.items():
+            if isinstance(val, dict) and 'items' in val:
+                for item in val['items']:
+                    if isinstance(item, dict) and 'color' in item:
+                        del item['color']
                     
         return node_data
 
@@ -232,15 +233,8 @@ class NodeSerializer:
 
         data['properties'] = NodeSerializer._serialize_properties(node)
 
-        if node.bl_idname in ('GeometryNodeSimulationInput', 'GeometryNodeSimulationOutput'):
-            data['simulation_state'] = NodeSerializer._serialize_zone_state(node, 'state_items')
-        elif node.bl_idname in ('GeometryNodeRepeatInput', 'GeometryNodeRepeatOutput'):
-            data['repeat_state'] = NodeSerializer._serialize_zone_state(node, 'repeat_items')
-        elif node.bl_idname in ('GeometryNodeBakeInput', 'GeometryNodeBakeOutput'):
-            data['bake_state'] = NodeSerializer._serialize_zone_state(node, 'bake_items')
-        
-        elif node.bl_idname in ('GeometryNodeForeachGeometryElementInput', 'GeometryNodeForeachGeometryElementOutput'):
-            NodeSerializer._serialize_foreach_stats(node, data)
+        # 【核心重构：万能提取雷达】取代 if-elif 硬编码
+        NodeSerializer._radar_extract_collections(node, data)
 
         if node.bl_idname == 'GeometryNodeGroup' and node.node_tree:
             data['node_tree_name'] = node.node_tree.name
@@ -248,27 +242,41 @@ class NodeSerializer:
         return data
 
     @staticmethod
-    def _serialize_foreach_stats(node, data):
-        if hasattr(node, 'main_items'):
-            data['foreach_main'] = NodeSerializer._serialize_item_collection(node.main_items)
-        if hasattr(node, 'input_items'):
-            data['foreach_input'] = NodeSerializer._serialize_item_collection(node.input_items)
-        if hasattr(node, 'generation_items'):
-            data['foreach_generation'] = NodeSerializer._serialize_item_collection(node.generation_items)
+    def _radar_extract_collections(node, data):
+        """【万能提取雷达】：无视节点类型，自动探测并提取底层集合数据"""
+        radar_map = {
+            'state_items': 'simulation_state',
+            'repeat_items': 'repeat_state',
+            'bake_items': 'bake_state',
+            'main_items': 'foreach_main',
+            'input_items': 'foreach_input',
+            'generation_items': 'foreach_generation'
+        }
+        
+        # 建立数据主权：寻找数据母体 (Output节点优先)
+        master_node = node
+        if 'Input' in node.bl_idname:
+            paired = getattr(node, 'paired_output', None) or getattr(node, 'pair_with_output', None)
+            if paired: 
+                master_node = paired
 
-    @staticmethod
-    def _serialize_item_collection(collection):
-        data = {'items': []}
-        for item in collection:
-            s_type = getattr(item, 'socket_type', 'FLOAT')
-            item_data = {
-                'name': item.name,
-                'socket_type': str(s_type),
-                'bl_socket_idname': node_mappings.get_socket_class_name(s_type) if node_mappings else 'NodeSocketFloat',
-            }
-            if hasattr(item, 'color'): item_data['color'] = list(item.color)
-            data['items'].append(item_data)
-        return data
+        for mem_attr, json_key in radar_map.items():
+            if hasattr(master_node, mem_attr) and not callable(getattr(master_node, mem_attr)):
+                collection = getattr(master_node, mem_attr)
+                if collection and len(collection) > 0:
+                    items = []
+                    for item in collection:
+                        # 兼容不同版本 Blender 的类型读取策略
+                        raw_type = getattr(item, 'socket_type', getattr(item, 'data_type', 'FLOAT'))
+                        item_data = {
+                            'name': getattr(item, 'name', 'Value'),
+                            'socket_type': str(raw_type),
+                            'bl_socket_idname': node_mappings.get_socket_class_name(raw_type) if node_mappings else 'NodeSocketFloat',
+                        }
+                        if hasattr(item, 'color'): item_data['color'] = list(item.color)
+                        items.append(item_data)
+                    
+                    data[json_key] = {'items': items, 'node_type': node.bl_idname}
 
     @staticmethod
     def _serialize_properties(node):
@@ -292,27 +300,6 @@ class NodeSerializer:
             props["capture_items_data"] = items
         return props
 
-    @staticmethod
-    def _serialize_zone_state(node, collection_name):
-        state_data = {'items': [], 'node_type': node.bl_idname}
-        output_node = node
-        if 'Input' in node.bl_idname:
-            paired = getattr(node, 'paired_output', None) or getattr(node, 'pair_with_output', None)
-            if paired: output_node = paired
-        
-        collection = getattr(output_node, collection_name, None)
-        if collection:
-            for item in collection:
-                s_type = getattr(item, 'socket_type', 'FLOAT')
-                item_data = {
-                    'name': item.name,
-                    'socket_type': str(s_type),
-                    'bl_socket_idname': node_mappings.get_socket_class_name(s_type) if node_mappings else 'NodeSocketFloat',
-                }
-                if hasattr(item, 'color'): item_data['color'] = list(item.color)
-                state_data['items'].append(item_data)
-        return state_data
-
 class SerializationEngine:
     def __init__(self, tree, context, selected_only=False, compact=False):
         self.tree = tree
@@ -328,6 +315,7 @@ class SerializationEngine:
         final_set = set(nodes)
         processed_ids = {n.as_pointer() for n in nodes}
 
+        # 【全域反向寻址字典】
         output_to_input_map = {}
         for n in self.tree.nodes:
             if hasattr(n, "paired_output") and n.paired_output:
@@ -389,7 +377,7 @@ class SerializationEngine:
                             self.connected_sockets.add((dest_sock.node.name, dest_sock.name))
 
         data = {
-            "version": "v5.14.75 Ultra-Compact Clean",
+            "version": "v5.14.129 Omega Armor",
             "tree_type": self.tree.bl_idname,
             "nodes": [],
             "links": links_data,
