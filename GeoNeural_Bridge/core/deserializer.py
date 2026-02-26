@@ -1,5 +1,5 @@
 # core/deserializer.py
-# GeoNeural Bridge v5.14.133 (Omega Armor - Semantic Anchor Pro)
+# GeoNeural Bridge v5.14.134 (Omega Armor - Precision Healing)
 # 机制优化: 增加对 AI 超紧凑 Dict 格式 inputs 的泛化支持。
 # 机制优化: 增加 input_type -> data_type 的专属语义别名桥接。
 # 架构级强化: 万能集合雷达、焦土重建协议与装甲回退试探器。
@@ -7,7 +7,8 @@
 # 漏洞修复: 引入 [语义绝对优先绑定]，解决动态节点序列化过程中的标识符漂移。
 # 架构级强化: 升级 [全向双写协议 Bidirectional Dual-Write]，同步 Zone 节点数据。
 # 核心修复: 引入 [Pulse-Sync Protocol] 脉冲同步协议，强制刷新 Zone 节点拓扑。
-# 核心修复: 增强 [Link Semantic Anchor]，引入双重故障转移机制，在对抗 Blender 重命名的同时兼容 AI 内部引用不一致。
+# 核心修复: 增强 [Link Semantic Anchor]，引入双重故障转移机制。
+# 紧急修复: 修正 [Auto-Heal] 机制的过度医疗问题，引入名称相似度阈值，防止缺失的外部节点被错误的内部节点顶替。
 
 import bpy
 import logging
@@ -127,10 +128,6 @@ class SocketResolver:
         def is_valid_socket(s):
             return (s.bl_idname != 'NodeSocketVirtual' or is_reroute) and s not in candidates
 
-        # 【语义绝对优先绑定】
-        # 如果提供了原始名称 (orig_name)，且处于动态 Zone 节点中，
-        # 优先尝试按名称 (Name) 匹配，无视底层标识符 (Identifier) 的差异。
-        # 这解决了 Compact Mode 下标识符漂移 (Item_2 -> Item_5) 导致的断连。
         if node and orig_name:
             is_dynamic = any(x in node.bl_idname for x in ['Group', 'Simulation', 'Repeat', 'Bake', 'Foreach'])
             if is_dynamic:
@@ -814,9 +811,6 @@ class DeserializationEngine:
         to_idx = link.get('dst_idx') or link.get('to_socket_index')
 
         # 【核心修复 - Omega Armor Semantic Anchor】
-        # 双重故障转移机制 (Double Failover Strategy):
-        # 1. 优先使用 JSON 中的原始名称 (src_orig_name) 查找数据，以对抗 Blender 强制重命名 (.001)。
-        # 2. 如果原始名称查找失败（例如 AI 内部引用不一致），回退到 Blender 实际对象名 (src.name) 查找。
         src_orig_name = link.get('src') or link.get('from_node')
         dst_orig_name = link.get('dst') or link.get('to_node')
 
@@ -882,8 +876,22 @@ class DeserializationEngine:
             best_candidate = None
             best_score = -1
             
+            # 【v5.14.134 修复】：获取源节点的原始名称暗示
+            src_name_hint = link.get('src') or link.get('from_node')
+            if not src_name_hint: continue
+
             for cand in candidates:
+                # 【关键修复】：引入名称相似度检测
+                # 如果名称相差太远（例如 Post_Raycast vs Debug_Line_Shape），则判定为无关节点，拒绝修复。
+                # 只有当名称高度相似（例如 Math vs Math.001）时，才认为是重命名导致的断连。
+                sim_score = difflib.SequenceMatcher(None, src_name_hint.lower(), cand.name.lower()).ratio()
+                
+                # 相似度阈值：低于 0.5 视为完全不同的节点，直接跳过
+                if sim_score < 0.5: continue
+
                 score = 0
+                score += (sim_score * 100) # 名称越像，权重越高
+
                 if cand.name not in connected_destinations: score += 10 
                 if "Input" in cand.bl_idname or "Info" in cand.bl_idname or "Time" in cand.bl_idname: score += 5
                 
@@ -894,7 +902,7 @@ class DeserializationEngine:
             if best_candidate:
                 if self._create_single_link(best_candidate, dst, link):
                     connected_sources.add(best_candidate.name)
-                    logger.info(f"Auto-Healed hallucinated link using orphan node: {best_candidate.name}")
+                    logger.info(f"Auto-Healed hallucinated link using orphan node: {best_candidate.name} (Similarity: {best_score:.2f})")
 
     def _restore_frames(self, frames_data):
         if not isinstance(frames_data, dict): return
