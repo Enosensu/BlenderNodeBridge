@@ -1,5 +1,5 @@
 # core/deserializer.py
-# GeoNeural Bridge v5.14.134 (Omega Armor - Precision Healing)
+# GeoNeural Bridge v5.14.137 (Omega Armor - EVP Abstraction)
 # 机制优化: 增加对 AI 超紧凑 Dict 格式 inputs 的泛化支持。
 # 机制优化: 增加 input_type -> data_type 的专属语义别名桥接。
 # 架构级强化: 万能集合雷达、焦土重建协议与装甲回退试探器。
@@ -8,7 +8,8 @@
 # 架构级强化: 升级 [全向双写协议 Bidirectional Dual-Write]，同步 Zone 节点数据。
 # 核心修复: 引入 [Pulse-Sync Protocol] 脉冲同步协议，强制刷新 Zone 节点拓扑。
 # 核心修复: 增强 [Link Semantic Anchor]，引入双重故障转移机制。
-# 紧急修复: 修正 [Auto-Heal] 机制的过度医疗问题，引入名称相似度阈值，防止缺失的外部节点被错误的内部节点顶替。
+# 架构级强化: 引入 Hybrid Validation Lock (混合验证锁)，防止外部缺失节点错连。
+# 终极抽象: 引入 EVP (Enabled Validation Priority) 机制，将几何节点的“动态销毁”特性抽象为全局验证逻辑，一劳永逸消除 ShaderNodeMix 等静态多态节点的幽灵插槽劫持，严格遵循 SOLID 原则。
 
 import bpy
 import logging
@@ -112,12 +113,29 @@ class SmartPropertySetter:
 
 class SocketResolver:
     @staticmethod
+    def _prioritize_active(candidates):
+        """
+        【EVP (Enabled Validation Priority) 机制】
+        将几何节点动态销毁失效插槽的特性，抽象为全局的逻辑排序原则。
+        通过优先选用 enabled=True 且 hide=False 的实体，
+        无论节点内部是使用动态重建(Geometry)还是静态池隐藏(Shader)，
+        都能确保准确抓取当前活跃的插槽，实现高内聚低耦合。
+        """
+        if not candidates:
+            return candidates
+        return sorted(
+            candidates, 
+            key=lambda s: (getattr(s, 'enabled', True), not getattr(s, 'hide', False)), 
+            reverse=True
+        )
+
+    @staticmethod
     def resolve_candidates(collection, name_or_ident, index=None, orig_name=None):
         candidates = []
         
         if index is not None and 0 <= index < len(collection):
             candidates.append(collection[index])
-            return candidates
+            return SocketResolver._prioritize_active(candidates)
 
         if not name_or_ident: return candidates
         name_str = str(name_or_ident).strip()
@@ -128,6 +146,7 @@ class SocketResolver:
         def is_valid_socket(s):
             return (s.bl_idname != 'NodeSocketVirtual' or is_reroute) and s not in candidates
 
+        # 1. 语义绝对优先绑定 (应对动态 Zone)
         if node and orig_name:
             is_dynamic = any(x in node.bl_idname for x in ['Group', 'Simulation', 'Repeat', 'Bake', 'Foreach'])
             if is_dynamic:
@@ -135,14 +154,15 @@ class SocketResolver:
                 for s in collection:
                     if s.name == orig_name_str and is_valid_socket(s):
                         candidates.append(s)
-                if candidates: return candidates
+                if candidates: return SocketResolver._prioritize_active(candidates)
 
+        # 2. 标识符或名称精准匹配
         for s in collection:
             if (s.identifier == name_str or s.name == name_str) and is_valid_socket(s):
                 candidates.append(s)
+        if candidates: return SocketResolver._prioritize_active(candidates)
 
-        if candidates: return candidates
-
+        # 3. 模糊语义匹配
         for s in collection:
             if not is_valid_socket(s): continue
             if (TextSmartEngine.match_loose(name_str, s.name) or 
@@ -150,32 +170,33 @@ class SocketResolver:
                 TextSmartEngine.match_loose(name_str, getattr(s, 'label', '')) or
                 TextSmartEngine.match_loose(name_str, s.bl_idname)):
                 candidates.append(s)
+        if candidates: return SocketResolver._prioritize_active(candidates)
 
-        if candidates: return candidates
-
+        # 4. XYZ/RGBA 单通道兜底映射
         name_upper = name_str.upper()
         if name_upper in {'A', 'B', 'C', 'D', 'X', 'Y', 'Z'}:
             idx_map = {'A': 0, 'X': 0, 'B': 1, 'Y': 1, 'C': 2, 'Z': 2, 'D': 3}
-            valid_sockets = [s for s in collection if is_valid_socket(s) and not getattr(s, 'hide', False) and getattr(s, 'enabled', True)]
+            valid_sockets = [s for s in collection if is_valid_socket(s) and getattr(s, 'enabled', True)]
             target_idx = idx_map[name_upper]
             if target_idx < len(valid_sockets):
                 candidates.append(valid_sockets[target_idx])
             return candidates
 
+        # 5. API 类名猜测匹配
         guessed_type = node_mappings.get_socket_class_name(name_str)
         if guessed_type:
             for s in collection:
-                if s.bl_idname == guessed_type and not getattr(s, 'hide', False) and getattr(s, 'enabled', True) and is_valid_socket(s):
+                if s.bl_idname == guessed_type and getattr(s, 'enabled', True) and is_valid_socket(s):
                     candidates.append(s)
-                    
-        if candidates: return candidates
+        if candidates: return SocketResolver._prioritize_active(candidates)
 
+        # 6. 万能通用泛指匹配 (Value/Result/Data)
         generic_terms = {"VALUE", "RESULT", "OUTPUT", "INPUT", "DATA", "ANY", "ATTRIBUTE"}
         if name_upper in generic_terms:
             data_sockets = []
             geo_sockets = []
             for s in collection:
-                if is_valid_socket(s) and not getattr(s, 'hide', False) and getattr(s, 'enabled', True):
+                if is_valid_socket(s) and getattr(s, 'enabled', True):
                     if s.type in {'GEOMETRY', 'OBJECT', 'COLLECTION', 'MATERIAL', 'TEXTURE', 'IMAGE'}:
                         geo_sockets.append(s)
                     else:
@@ -186,7 +207,7 @@ class SocketResolver:
             else:
                 candidates.extend(geo_sockets)
 
-        return candidates
+        return SocketResolver._prioritize_active(candidates)
 
 
 # ==============================================================================
@@ -402,12 +423,10 @@ class DeserializationEngine:
             if unassigned:
                 self._propagate_attributes(node, unassigned)
 
-            # 核心数据注入
             self._radar_restore_collections(node, n_data)
 
         # ==============================================================================
         # ⚡ [OMEGA PATCH] 脉冲同步协议 (Pulse-Sync Protocol)
-        # 目的: 消除 Zone 节点数据注入后，Socket 生成前的时序真空
         # ==============================================================================
         self._force_topology_refresh() 
         # ==============================================================================
@@ -443,33 +462,25 @@ class DeserializationEngine:
         return list(self.node_map.values())
 
     def _force_topology_refresh(self):
-        """
-        [Omega Armor] 强制 Blender 根据 Items 数据计算并生成 Sockets。
-        这解决了 Simulation/Repeat Zone 自定义接口无法立即连线的问题。
-        """
         try:
-            # 1. 基础标签更新 (通知 Blender 树结构已脏)
             if hasattr(self.tree, "update_tag"):
                 self.tree.update_tag()
             
-            # 2. 强制上下文更新 (这是生成 Zone Sockets 的关键)
-            # 注意: 这是一个昂贵的操作，但对于 Zone 重建是必须的。
-            # 我们通过检测是否存在 Zone 节点来决定是否执行，以优化性能。
             has_zone = any(
                 "Simulation" in n.bl_idname or 
                 "Repeat" in n.bl_idname or 
                 "Bake" in n.bl_idname or
-                "Foreach" in n.bl_idname 
+                "Foreach" in n.bl_idname or
+                "Mix" in n.bl_idname or
+                "Math" in n.bl_idname
                 for n in self.node_map.values()
             )
             
             if has_zone and self.context:
-                # 尝试触发视图层更新，迫使 NodeTree 评估
-                # 某些情况下，仅 update_tag 是不够的
                 if hasattr(self.context, "view_layer") and hasattr(self.context.view_layer, "update"):
                     self.context.view_layer.update()
                 
-                logger.debug("⚡ [Pulse-Sync] Forced topology refresh for Zone Sockets.")
+                logger.debug("⚡ [Pulse-Sync] Forced topology refresh for dynamic sockets.")
         except Exception as e:
             logger.warning(f"⚡ [Pulse-Sync] Refresh warning: {e}")
 
@@ -655,7 +666,6 @@ class DeserializationEngine:
     # --------------------------------------------------------------------------
 
     def _radar_restore_collections(self, node, n_data):
-        """【万能集合雷达】：无视硬编码，自动探测节点自带集合并灌入数据"""
         radar_map = {
             'capture_items_data': 'capture_items',
             'simulation_state': 'state_items',
@@ -685,16 +695,14 @@ class DeserializationEngine:
                 
                 target_nodes = [node]
                 
-                # 【双向查找协议】：无论给的是 Input 还是 Output，都能顺藤摸瓜找到另一半
                 if 'Input' in node.bl_idname and hasattr(node, 'paired_output') and node.paired_output:
                     if node.paired_output not in target_nodes:
-                        target_nodes.insert(0, node.paired_output) # Output 优先（Master）
+                        target_nodes.insert(0, node.paired_output)
                 elif 'Output' in node.bl_idname:
-                    # 反向查找：遍历当前图谱，寻找哪个 Input 的 paired_output 是当前节点
                     for sibling in self.node_map.values():
                         if 'Input' in sibling.bl_idname and getattr(sibling, 'paired_output', None) == node:
                             if sibling not in target_nodes:
-                                target_nodes.append(sibling) # Input 延后（Proxy）
+                                target_nodes.append(sibling)
                             break
                 
                 for t_node in target_nodes:
@@ -711,10 +719,8 @@ class DeserializationEngine:
                     if target_col_name:
                         collection = getattr(t_node, target_col_name)
                         self._scorched_earth_rebuild(collection, items_data)
-                        # 不触发 break，对目标列表执行完美双写 (Dual-Write)
 
     def _scorched_earth_rebuild(self, collection, items_data):
-        """【焦土重建协议】：先拔除所有系统幽灵占位符，再重构数据"""
         if not isinstance(items_data, list): return
         
         try:
@@ -737,7 +743,6 @@ class DeserializationEngine:
             self._robust_new_item(collection, raw_type, name)
 
     def _robust_new_item(self, collection, raw_type, name):
-        """【装甲回退试探器】：免疫 API Enum 断层与精神分裂"""
         api_type = node_mappings.get_api_enum(raw_type)
         fallbacks = [api_type]
         
@@ -810,15 +815,14 @@ class DeserializationEngine:
         from_idx = link.get('src_idx') or link.get('from_socket_index')
         to_idx = link.get('dst_idx') or link.get('to_socket_index')
 
-        # 【核心修复 - Omega Armor Semantic Anchor】
         src_orig_name = link.get('src') or link.get('from_node')
         dst_orig_name = link.get('dst') or link.get('to_node')
 
         src_data = self.raw_nodes_map.get(src_orig_name)
-        if not src_data: src_data = self.raw_nodes_map.get(src.name, {}) # Failover
+        if not src_data: src_data = self.raw_nodes_map.get(src.name, {})
 
         dst_data = self.raw_nodes_map.get(dst_orig_name)
-        if not dst_data: dst_data = self.raw_nodes_map.get(dst.name, {}) # Failover
+        if not dst_data: dst_data = self.raw_nodes_map.get(dst.name, {})
         
         def get_orig_name(node_data, ident):
             if not node_data: return None
@@ -848,12 +852,10 @@ class DeserializationEngine:
                     to_sock = other_sock
                     break
 
-        # === [DIAGNOSTIC PROBE] 诊断探针 ===
         if not to_sock and "Simulation" in dst.bl_idname:
             logger.warning(f"❌ [Link-Trace] Failed to find target socket on {dst.name}")
             logger.warning(f"   Target: '{to_sock_ident}' (Index: {to_idx})")
             logger.warning(f"   Available Sockets: {[s.name for s in dst.inputs]}")
-        # ===================================
 
         if from_sock and to_sock:
             try: 
@@ -876,21 +878,26 @@ class DeserializationEngine:
             best_candidate = None
             best_score = -1
             
-            # 【v5.14.134 修复】：获取源节点的原始名称暗示
             src_name_hint = link.get('src') or link.get('from_node')
             if not src_name_hint: continue
 
+            hint_lower = src_name_hint.lower()
+
             for cand in candidates:
-                # 【关键修复】：引入名称相似度检测
-                # 如果名称相差太远（例如 Post_Raycast vs Debug_Line_Shape），则判定为无关节点，拒绝修复。
-                # 只有当名称高度相似（例如 Math vs Math.001）时，才认为是重命名导致的断连。
-                sim_score = difflib.SequenceMatcher(None, src_name_hint.lower(), cand.name.lower()).ratio()
+                cand_name_lower = cand.name.lower()
                 
-                # 相似度阈值：低于 0.5 视为完全不同的节点，直接跳过
+                is_versioned_name = cand_name_lower.startswith(hint_lower + ".")
+                is_contained = hint_lower in cand_name_lower
+                
+                if is_versioned_name or is_contained:
+                    sim_score = 0.9
+                else:
+                    sim_score = difflib.SequenceMatcher(None, hint_lower, cand_name_lower).ratio()
+                
                 if sim_score < 0.5: continue
 
                 score = 0
-                score += (sim_score * 100) # 名称越像，权重越高
+                score += (sim_score * 100)
 
                 if cand.name not in connected_destinations: score += 10 
                 if "Input" in cand.bl_idname or "Info" in cand.bl_idname or "Time" in cand.bl_idname: score += 5
@@ -902,7 +909,7 @@ class DeserializationEngine:
             if best_candidate:
                 if self._create_single_link(best_candidate, dst, link):
                     connected_sources.add(best_candidate.name)
-                    logger.info(f"Auto-Healed hallucinated link using orphan node: {best_candidate.name} (Similarity: {best_score:.2f})")
+                    logger.info(f"Auto-Healed hallucinated link using orphan node: {best_candidate.name} (Score: {best_score:.2f})")
 
     def _restore_frames(self, frames_data):
         if not isinstance(frames_data, dict): return
