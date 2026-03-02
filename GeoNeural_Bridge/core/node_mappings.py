@@ -1,7 +1,8 @@
 # core/node_mappings.py
-# GeoNeural Bridge v5.14.111 (Deep Reflection & Core Semantic Difflib)
+# GeoNeural Bridge v5.14.140 (Omega Armor - Core Node Injection)
 # 修复: 引入递归子类扫描 _get_all_subclasses，彻底解决 dir(bpy.types) 带来的类名漏算问题。
-# 修复: 剥离无意义前缀后进行 Difflib 比对，防止 FunctionNode 前缀膨胀导致的节点突变误判。
+# 终极架构: 废弃外部补丁，将“命名空间幻觉救援 (Namespace Rescue)”原生融入智能匹配引擎。
+# 核心修复: 针对 Blender C++ 底层节点 (如 NodeGroupInput) 不暴露类级 bl_idname 的暗坑，引入【核心节点硬注入】与快速通道映射，彻底解决组输入/输出节点的复制粘贴崩溃。
 
 import bpy
 import difflib
@@ -95,7 +96,6 @@ class SocketTypeResolver:
     @classmethod
     def _build_cache(cls):
         if cls._CACHE_BUILT: return
-        # 使用完美的递归子类扫描获取所有合法 Socket
         for socket_cls in _get_all_subclasses(bpy.types.NodeSocket):
             if hasattr(socket_cls, "bl_idname") and socket_cls.bl_idname:
                 cls._SOCKET_CACHE[socket_cls.bl_idname.upper()] = socket_cls.bl_idname
@@ -140,7 +140,7 @@ class SocketTypeResolver:
 
 
 # ==============================================================================
-# 3. 动态节点数据库与名称解析器 (Semantic Difflib & Priority)
+# 3. 动态节点数据库与名称解析器 (Semantic Candidates Engine)
 # ==============================================================================
 
 class NodeNameMatcher:
@@ -150,50 +150,65 @@ class NodeNameMatcher:
     @classmethod
     def _build_cache(cls):
         if cls._CACHE_BUILT: return
-        # 使用完美的递归子类扫描获取所有合法 Node
         for node_cls in _get_all_subclasses(bpy.types.Node):
             if hasattr(node_cls, "bl_idname") and node_cls.bl_idname:
                 cls._CLASS_ID_CACHE[node_cls.bl_idname] = node_cls.bl_idname
                 
-        cls._CLASS_ID_CACHE["NodeFrame"] = "NodeFrame"
+        # 【核心漏洞修复】强制注入 Blender C++ 底层静默节点
+        # 这些节点在类定义上没有暴露 bl_idname，导致反射机制漏抓。
+        core_nodes = ["NodeGroupInput", "NodeGroupOutput", "NodeFrame", "NodeReroute", "NodeCustomGroup"]
+        for cn in core_nodes:
+            cls._CLASS_ID_CACHE[cn] = cn
+            
         cls._CACHE_BUILT = True
 
     @classmethod
-    def _prioritize(cls, matches):
-        for prefix in ['ShaderNode', 'GeometryNode', 'FunctionNode']:
-            for m in matches:
-                if m.startswith(prefix): return m
-        return matches[0]
-
-    @classmethod
-    def resolve_idname(cls, fuzzy_name):
-        if not fuzzy_name: return "NodeFrame"
+    def resolve_idname_candidates(cls, fuzzy_name):
+        """
+        【Omega 核心】返回所有可能的节点合法 ID 候选队列。
+        从最精确的语义匹配到最极端的盲猜前缀拼接，确保执行器绝对有足够的备选子弹。
+        """
+        if not fuzzy_name: return ["NodeFrame"]
         if not cls._CACHE_BUILT: cls._build_cache()
         
+        candidates = []
+        
+        # 0. 极速通道 (常见别名与高频核心节点)
         fast_path = {
             "MATH": "ShaderNodeMath", "VECTOR_MATH": "ShaderNodeVectorMath",
             "MIX": "ShaderNodeMix", "BOOLEAN_MATH": "FunctionNodeBooleanMath",
-            "COMPARE": "FunctionNodeCompare"
+            "COMPARE": "FunctionNodeCompare",
+            "GROUP_INPUT": "NodeGroupInput", "GROUP_OUTPUT": "NodeGroupOutput",
+            "REROUTE": "NodeReroute"
         }
         clean_name = TextSmartEngine.clean_polymorphic(fuzzy_name)
-        if clean_name in fast_path: return fast_path[clean_name]
-        
-        # 1. 精确匹配
-        if fuzzy_name in cls._CLASS_ID_CACHE:
-            return cls._CLASS_ID_CACHE[fuzzy_name]
+        if clean_name in fast_path:
+            candidates.append(fast_path[clean_name])
+            
+        # 1. 严格精确匹配
+        if fuzzy_name in cls._CLASS_ID_CACHE and fuzzy_name not in candidates:
+            candidates.append(fuzzy_name)
             
         norm_fuzzy = TextSmartEngine.strip_blender_api_prefix(fuzzy_name)
+        prefixes = ['ShaderNode', 'GeometryNode', 'FunctionNode', 'TextureNode', 'CompositorNode']
         
-        # 2. 核心语义精确匹配
+        # 2. 核心语义精确匹配 (跨域前缀扩展)
         matches_exact = [bid for bid in cls._CLASS_ID_CACHE.keys() if norm_fuzzy == TextSmartEngine.strip_blender_api_prefix(bid)]
-        if matches_exact: return cls._prioritize(matches_exact)
-        
-        # 3. Token 子集匹配
+        for p in prefixes:
+            for m in matches_exact:
+                if m.startswith(p) and m not in candidates: candidates.append(m)
+        for m in matches_exact:
+            if m not in candidates: candidates.append(m)
+            
+        # 3. Token 子集包含匹配
         matches_sub = [bid for bid in cls._CLASS_ID_CACHE.keys() if TextSmartEngine.match_subset(fuzzy_name, bid)]
-        if matches_sub: return cls._prioritize(matches_sub)
-        
-        # 4. 【机制核心修复】纯粹核心语义拼写纠错 (免疫前缀膨胀陷阱)
-        # 将所有缓存节点剥离前缀，建立 {纯净语义: [原始ID列表]} 的映射表
+        for p in prefixes:
+            for m in matches_sub:
+                if m.startswith(p) and m not in candidates: candidates.append(m)
+        for m in matches_sub:
+            if m not in candidates: candidates.append(m)
+            
+        # 4. Difflib 纠错匹配
         core_dict = {}
         for bid in cls._CLASS_ID_CACHE.keys():
             stripped = TextSmartEngine.strip_blender_api_prefix(bid)
@@ -201,14 +216,25 @@ class NodeNameMatcher:
                 core_dict[stripped] = []
             core_dict[stripped].append(bid)
             
-        # 让 "COMPARE" 去和 "BOOLEAN_MATH" 比拼，而不是 "FunctionNodeCompare"
-        matches_diff = difflib.get_close_matches(norm_fuzzy, list(core_dict.keys()), n=1, cutoff=0.75)
-        if matches_diff:
-            best_stripped = matches_diff[0]
-            # 若有多个节点(如 ShaderNodeMath/TextureNodeMath)共用同一核心语义，交给优先级器裁决
-            return cls._prioritize(core_dict[best_stripped])
+        matches_diff = difflib.get_close_matches(norm_fuzzy, list(core_dict.keys()), n=2, cutoff=0.70)
+        for diff_val in matches_diff:
+            bids = core_dict[diff_val]
+            for p in prefixes:
+                for m in bids:
+                    if m.startswith(p) and m not in candidates: candidates.append(m)
+            for m in bids:
+                if m not in candidates: candidates.append(m)
+                
+        # 5. 终极盲区救援 (应对未在缓存中显现的未来版本 API)
+        core_name_raw = re.sub(r'^(ShaderNode|GeometryNode|FunctionNode|TextureNode|CompositorNode|Node)', '', fuzzy_name, flags=re.IGNORECASE)
+        for p in prefixes:
+            blind = p + core_name_raw
+            if blind not in candidates: candidates.append(blind)
             
-        return fuzzy_name
+        if fuzzy_name not in candidates:
+            candidates.append(fuzzy_name)
+            
+        return candidates
 
 
 # ==============================================================================
@@ -221,8 +247,14 @@ def get_socket_class_name(enum_type):
 def get_api_enum(class_name_or_type):
     return SocketTypeResolver.get_api_enum(class_name_or_type)
 
+def resolve_node_idname_candidates(fuzzy_name):
+    """返回最优备选队列 (List)"""
+    return NodeNameMatcher.resolve_idname_candidates(fuzzy_name)
+
 def resolve_node_idname(fuzzy_name):
-    return NodeNameMatcher.resolve_idname(fuzzy_name)
+    """向下兼容旧版接口，仅返回置信度最高的一个"""
+    cands = NodeNameMatcher.resolve_idname_candidates(fuzzy_name)
+    return cands[0] if cands else "NodeFrame"
 
 def load_db():
     SocketTypeResolver._build_cache()

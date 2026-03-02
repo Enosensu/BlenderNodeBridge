@@ -1,15 +1,11 @@
 # core/deserializer.py
-# GeoNeural Bridge v5.14.137 (Omega Armor - EVP Abstraction)
+# GeoNeural Bridge v5.14.140 (Omega Armor - Core Node Injection)
 # 机制优化: 增加对 AI 超紧凑 Dict 格式 inputs 的泛化支持。
 # 机制优化: 增加 input_type -> data_type 的专属语义别名桥接。
 # 架构级强化: 万能集合雷达、焦土重建协议与装甲回退试探器。
 # 漏洞修复: 引入内部填充协议，解决 API 创建 NodeGroup 内部真空的缺陷。
-# 漏洞修复: 引入 [语义绝对优先绑定]，解决动态节点序列化过程中的标识符漂移。
-# 架构级强化: 升级 [全向双写协议 Bidirectional Dual-Write]，同步 Zone 节点数据。
-# 核心修复: 引入 [Pulse-Sync Protocol] 脉冲同步协议，强制刷新 Zone 节点拓扑。
-# 核心修复: 增强 [Link Semantic Anchor]，引入双重故障转移机制。
-# 架构级强化: 引入 Hybrid Validation Lock (混合验证锁)，防止外部缺失节点错连。
-# 终极抽象: 引入 EVP (Enabled Validation Priority) 机制，将几何节点的“动态销毁”特性抽象为全局验证逻辑，一劳永逸消除 ShaderNodeMix 等静态多态节点的幽灵插槽劫持，严格遵循 SOLID 原则。
+# 架构级强化: 引入 EVP (Enabled Validation Priority) 机制，解决多态节点幽灵插槽劫持。
+# 终极架构: 完全拥抱 resolve_node_idname_candidates，按队列依次尝试执行实例化，彻底淘汰硬编码的 fallback 补丁。
 
 import bpy
 import logging
@@ -114,13 +110,6 @@ class SmartPropertySetter:
 class SocketResolver:
     @staticmethod
     def _prioritize_active(candidates):
-        """
-        【EVP (Enabled Validation Priority) 机制】
-        将几何节点动态销毁失效插槽的特性，抽象为全局的逻辑排序原则。
-        通过优先选用 enabled=True 且 hide=False 的实体，
-        无论节点内部是使用动态重建(Geometry)还是静态池隐藏(Shader)，
-        都能确保准确抓取当前活跃的插槽，实现高内聚低耦合。
-        """
         if not candidates:
             return candidates
         return sorted(
@@ -146,7 +135,6 @@ class SocketResolver:
         def is_valid_socket(s):
             return (s.bl_idname != 'NodeSocketVirtual' or is_reroute) and s not in candidates
 
-        # 1. 语义绝对优先绑定 (应对动态 Zone)
         if node and orig_name:
             is_dynamic = any(x in node.bl_idname for x in ['Group', 'Simulation', 'Repeat', 'Bake', 'Foreach'])
             if is_dynamic:
@@ -156,13 +144,12 @@ class SocketResolver:
                         candidates.append(s)
                 if candidates: return SocketResolver._prioritize_active(candidates)
 
-        # 2. 标识符或名称精准匹配
         for s in collection:
             if (s.identifier == name_str or s.name == name_str) and is_valid_socket(s):
                 candidates.append(s)
+
         if candidates: return SocketResolver._prioritize_active(candidates)
 
-        # 3. 模糊语义匹配
         for s in collection:
             if not is_valid_socket(s): continue
             if (TextSmartEngine.match_loose(name_str, s.name) or 
@@ -170,9 +157,9 @@ class SocketResolver:
                 TextSmartEngine.match_loose(name_str, getattr(s, 'label', '')) or
                 TextSmartEngine.match_loose(name_str, s.bl_idname)):
                 candidates.append(s)
+
         if candidates: return SocketResolver._prioritize_active(candidates)
 
-        # 4. XYZ/RGBA 单通道兜底映射
         name_upper = name_str.upper()
         if name_upper in {'A', 'B', 'C', 'D', 'X', 'Y', 'Z'}:
             idx_map = {'A': 0, 'X': 0, 'B': 1, 'Y': 1, 'C': 2, 'Z': 2, 'D': 3}
@@ -182,15 +169,14 @@ class SocketResolver:
                 candidates.append(valid_sockets[target_idx])
             return candidates
 
-        # 5. API 类名猜测匹配
         guessed_type = node_mappings.get_socket_class_name(name_str)
         if guessed_type:
             for s in collection:
                 if s.bl_idname == guessed_type and getattr(s, 'enabled', True) and is_valid_socket(s):
                     candidates.append(s)
+                    
         if candidates: return SocketResolver._prioritize_active(candidates)
 
-        # 6. 万能通用泛指匹配 (Value/Result/Data)
         generic_terms = {"VALUE", "RESULT", "OUTPUT", "INPUT", "DATA", "ANY", "ATTRIBUTE"}
         if name_upper in generic_terms:
             data_sockets = []
@@ -425,11 +411,7 @@ class DeserializationEngine:
 
             self._radar_restore_collections(node, n_data)
 
-        # ==============================================================================
-        # ⚡ [OMEGA PATCH] 脉冲同步协议 (Pulse-Sync Protocol)
-        # ==============================================================================
         self._force_topology_refresh() 
-        # ==============================================================================
 
         for n_data in nodes_data:
             if not isinstance(n_data, dict): continue
@@ -632,17 +614,32 @@ class DeserializationEngine:
 
     def _create_node_skeleton(self, n_data, offset):
         raw_idname = n_data.get('bl_idname', 'NodeFrame')
-        bl_idname = node_mappings.resolve_node_idname(raw_idname)
+        
+        # 核心逻辑：获取智能队列并依次尝试，实现物理验证
+        candidates = node_mappings.resolve_node_idname_candidates(raw_idname)
+        
+        node = None
+        for test_id in candidates:
+            try:
+                node = self.tree.nodes.new(test_id)
+                if test_id != raw_idname and test_id != candidates[0]:
+                    logger.info(f"⚡ [Armor Rebuild] Rescued namespace hallucination: {raw_idname} -> {test_id}")
+                break
+            except:
+                pass
+        
+        # 物理锁定报警框：当所有可能性枯竭时
+        if not node:
+            node = self.tree.nodes.new("NodeFrame")
+            node.label = f"MISSING: {raw_idname}"
+            n_data['label'] = node.label
+            n_data['use_custom_color'] = True
+            n_data['color'] = (1.0, 0.2, 0.2)
+            n_data['width'] = 220.0
+            n_data['height'] = 100.0
+            logger.warning(f"❌ Failed to create node {raw_idname} after exhausting {len(candidates)} candidates.")
         
         orig_name = n_data.get('name')
-        
-        try: 
-            node = self.tree.nodes.new(bl_idname)
-        except Exception as e: 
-            node = self.tree.nodes.new("NodeFrame")
-            node.label = f"MISSING: {bl_idname}"
-            logger.warning(f"Failed to create node {bl_idname}, error: {e}")
-        
         if orig_name:
             node.name = orig_name 
         else:

@@ -1,7 +1,8 @@
 # core/serializer.py
-# GeoNeural Bridge v5.14.129 (Omega Armor - Universal Extraction Radar)
+# GeoNeural Bridge v5.14.141 (Omega Armor - Index Identity Mapping)
 # 机制优化: 进一步封堵 RNA 属性泄露，彻底过滤 properties 中的 UI 尺寸限界参数和空字符串 label。
 # 架构级强化: 废除硬编码的 if-elif Zone 节点类型判定，引入【万能探针提取器】，实现对未知/未来版本动态节点的自动化数据抓取。
+# 核心修复: 修复精简模式 (Compact Mode) 下，多输入节点(如 Math)的同名插槽因名称碰撞导致 default_value 被误判剥离的 Bug，全面切入物理 Index 映射锚点。
 # 架构: Topology Tracer -> Reroute Bypass -> Data Clean -> Compact Filter -> Output
 
 import bpy
@@ -233,7 +234,6 @@ class NodeSerializer:
 
         data['properties'] = NodeSerializer._serialize_properties(node)
 
-        # 【核心重构：万能提取雷达】取代 if-elif 硬编码
         NodeSerializer._radar_extract_collections(node, data)
 
         if node.bl_idname == 'GeometryNodeGroup' and node.node_tree:
@@ -266,7 +266,6 @@ class NodeSerializer:
                 if collection and len(collection) > 0:
                     items = []
                     for item in collection:
-                        # 兼容不同版本 Blender 的类型读取策略
                         raw_type = getattr(item, 'socket_type', getattr(item, 'data_type', 'FLOAT'))
                         item_data = {
                             'name': getattr(item, 'name', 'Value'),
@@ -309,13 +308,14 @@ class SerializationEngine:
         
         initial_nodes = [n for n in tree.nodes if n.select] if selected_only else list(tree.nodes)
         self.nodes_to_process = self._ensure_zone_integrity(initial_nodes)
+        
+        # 【架构修复】不再使用 (node_name, socket_name)，切入绝对物理索引 (node_name, socket_index)
         self.connected_sockets = set()
 
     def _ensure_zone_integrity(self, nodes):
         final_set = set(nodes)
         processed_ids = {n.as_pointer() for n in nodes}
 
-        # 【全域反向寻址字典】
         output_to_input_map = {}
         for n in self.tree.nodes:
             if hasattr(n, "paired_output") and n.paired_output:
@@ -372,12 +372,13 @@ class SerializationEngine:
                         
                         links_data.append(link_data)
                         
+                        # 【核心防线】记录目标的唯一物理索引 Index，彻底杜绝名称碰撞
                         if self.compact:
-                            self.connected_sockets.add((dest_sock.node.name, getattr(dest_sock, 'identifier', dest_sock.name)))
-                            self.connected_sockets.add((dest_sock.node.name, dest_sock.name))
+                            dest_idx = self._get_socket_index(dest_sock.node.inputs, dest_sock)
+                            self.connected_sockets.add((dest_sock.node.name, dest_idx))
 
         data = {
-            "version": "v5.14.129 Omega Armor",
+            "version": "v5.14.141 Omega Armor",
             "tree_type": self.tree.bl_idname,
             "nodes": [],
             "links": links_data,
@@ -389,10 +390,10 @@ class SerializationEngine:
                 node_data = NodeSerializer.serialize(node)
                 if self.compact:
                     node_data = CompactFilter.process_node(node_data)
+                    # 【核心防线】仅当当前插槽的物理 Index 被记录为已连线时，才执行裁剪清空
                     if node.bl_idname != 'NodeFrame' and 'inputs' in node_data:
                         for inp in node_data['inputs']:
-                            if (node.name, inp.get('identifier', '')) in self.connected_sockets or \
-                               (node.name, inp.get('name', '')) in self.connected_sockets:
+                            if (node.name, inp.get('index', -1)) in self.connected_sockets:
                                 if 'default_value' in inp: del inp['default_value']
                 data["nodes"].append(node_data)
             except Exception as e:
