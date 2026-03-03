@@ -1,5 +1,5 @@
 # core/serializer.py
-# GeoNeural Bridge v5.14.141 (Omega Armor - Index Identity Mapping)
+# BlenderNodeBridge v5.14.141 (Omega Armor - Index Identity Mapping)
 # 机制优化: 进一步封堵 RNA 属性泄露，彻底过滤 properties 中的 UI 尺寸限界参数和空字符串 label。
 # 架构级强化: 废除硬编码的 if-elif Zone 节点类型判定，引入【万能探针提取器】，实现对未知/未来版本动态节点的自动化数据抓取。
 # 核心修复: 修复精简模式 (Compact Mode) 下，多输入节点(如 Math)的同名插槽因名称碰撞导致 default_value 被误判剥离的 Bug，全面切入物理 Index 映射锚点。
@@ -14,7 +14,7 @@ try:
 except ImportError:
     node_mappings = None
 
-logger = logging.getLogger("GeoNeuralBridge.serializer")
+logger = logging.getLogger("BlenderNodeBridge.serializer")
 
 # ==============================================================================
 # 1. 基础工具集

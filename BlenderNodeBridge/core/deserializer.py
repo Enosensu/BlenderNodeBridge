@@ -1,5 +1,5 @@
 # core/deserializer.py
-# GeoNeural Bridge v5.14.140 (Omega Armor - Core Node Injection)
+# BlenderNodeBridge v5.14.141 (Omega Armor - Core Node Injection)
 # 机制优化: 增加对 AI 超紧凑 Dict 格式 inputs 的泛化支持。
 # 机制优化: 增加 input_type -> data_type 的专属语义别名桥接。
 # 架构级强化: 万能集合雷达、焦土重建协议与装甲回退试探器。
@@ -15,7 +15,7 @@ from mathutils import Vector, Euler, Matrix, Color, Quaternion
 from . import node_mappings
 from .node_mappings import TextSmartEngine, SocketTypeResolver
 
-logger = logging.getLogger("GeoNeuralBridge.deserializer")
+logger = logging.getLogger("BlenderNodeBridge.deserializer")
 
 # ==============================================================================
 # 1. 智能属性设置器

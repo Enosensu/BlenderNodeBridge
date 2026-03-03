@@ -1,5 +1,5 @@
 # core/node_mappings.py
-# GeoNeural Bridge v5.14.140 (Omega Armor - Core Node Injection)
+# BlenderNodeBridge v5.14.141 (Omega Armor - Core Node Injection)
 # 修复: 引入递归子类扫描 _get_all_subclasses，彻底解决 dir(bpy.types) 带来的类名漏算问题。
 # 终极架构: 废弃外部补丁，将“命名空间幻觉救援 (Namespace Rescue)”原生融入智能匹配引擎。
 # 核心修复: 针对 Blender C++ 底层节点 (如 NodeGroupInput) 不暴露类级 bl_idname 的暗坑，引入【核心节点硬注入】与快速通道映射，彻底解决组输入/输出节点的复制粘贴崩溃。

@@ -1,5 +1,5 @@
 # operators/clipboard.py
-# GeoNeural Bridge v5.14.46
+# BlenderNodeBridge v5.14.141
 # 修复: 增强 RobustLoader 以处理非断行空格(\xa0)导致的 JSON 解析失败
 # 基础: v5.14.3
 
@@ -17,7 +17,7 @@ try:
 except ImportError:
     node_mappings = None
 
-logger = logging.getLogger("GeoNeuralBridge.clipboard")
+logger = logging.getLogger("BlenderNodeBridge.clipboard")
 
 # ==============================================================================
 # 0. 日志配置
@@ -28,9 +28,9 @@ def configure_logging(context):
         debug_mode = getattr(context.scene, "gn_debug_mode", False)
         target_level = logging.DEBUG if debug_mode else logging.INFO
         logger.setLevel(target_level)
-        logging.getLogger("GeoNeuralBridge.serializer").setLevel(target_level)
-        logging.getLogger("GeoNeuralBridge.deserializer").setLevel(target_level)
-        logging.getLogger("GeoNeuralBridge.clipboard").setLevel(target_level)
+        logging.getLogger("BlenderNodeBridge.serializer").setLevel(target_level)
+        logging.getLogger("BlenderNodeBridge.deserializer").setLevel(target_level)
+        logging.getLogger("BlenderNodeBridge.clipboard").setLevel(target_level)
         
         if not logger.handlers:
             handler = logging.StreamHandler(sys.stdout)

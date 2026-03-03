@@ -1,12 +1,12 @@
 # __init__.py
-# GeoNeural Bridge v5.14.7 - UI Compact
+# BlenderNodeBridge v5.14.141 - UI Compact
 # 修复: 移除 Debug 面板上方多余的 separator，减少 UI 留白，使布局更紧凑
 # 基础: v5.14.6 (Twin Buttons)
 
 bl_info = {
-    "name": "GeoNeural Bridge (v5.14.7 UI)",
+    "name": "BlenderNodeBridge (v5.14.141 UI)",
     "author": "Dev_Nodes_V5 & Dev_Analyst",
-    "version": (5, 14, 7),
+    "version": (5, 14, 141),
     "blender": (4, 0, 0),
     "location": "Node Editor > Sidebar > GeoNeural",
     "description": "UI 紧凑版：优化面板间距，提升视觉连贯性。",
