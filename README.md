@@ -54,7 +54,7 @@
 
 或直接下载Release中的zip文件进行安装
 
-[![GitHub Release](https://img.shields.io/github/v/release/Enosensu/BlenderNodeBridge)](https://github.com/Enosensu/BlenderNodeBridge/releases)
+[![GitHub Release](https://img.shields.io/github/v/release/Enosensu/BlenderNodeBridge?style=flat-square&logo=blender&logoColor=white)](https://github.com/Enosensu/BlenderNodeBridge/releases)
 
 ---
 
