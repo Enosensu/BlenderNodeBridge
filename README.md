@@ -52,6 +52,10 @@
 4. 进入 `编辑 (Edit)` > `偏好设置 (Preferences)` > `插件 (Add-ons)`。
 5. 在搜索框输入 `BlenderNodeBridge` 并勾选启用。
 
+或直接下载Release中的zip文件进行安装
+
+![最新版本](https://img.shields.io/github/v/release/Enosensu/BlenderNodeBridge)
+
 ---
 
 ## 🤝 鸣谢 (Acknowledgements)
