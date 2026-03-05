@@ -1,15 +1,17 @@
 # core/deserializer.py
-# BlenderNodeBridge v5.14.141 (Omega Armor - Core Node Injection)
+# BlenderNodeBridge v5.14.158 (Omega Armor - Permutation Trial)
 # 机制优化: 增加对 AI 超紧凑 Dict 格式 inputs 的泛化支持。
-# 机制优化: 增加 input_type -> data_type 的专属语义别名桥接。
-# 架构级强化: 万能集合雷达、焦土重建协议与装甲回退试探器。
-# 漏洞修复: 引入内部填充协议，解决 API 创建 NodeGroup 内部真空的缺陷。
-# 架构级强化: 引入 EVP (Enabled Validation Priority) 机制，解决多态节点幽灵插槽劫持。
-# 终极架构: 完全拥抱 resolve_node_idname_candidates，按队列依次尝试执行实例化，彻底淘汰硬编码的 fallback 补丁。
+# 核心修复: [Permutation Trial] 突破 Blender 懒加载陷阱！在内存反射前，先通过 itertools.permutations 对核心异位词进行物理试探，强行唤醒未加载的类 (如 GeometryNodeFilletCurve)。
+# 核心修复: [Global Anagram Rescue] 内存反射 Jaccard 兜底。
+# 核心修复: [Semantic Supremacy] 确立语义绝对优先原则，防范 Index 错位。
+# 核心修复: [Atomic Assignment] 安全分量遍历写入，穿透严格类型检查。
+# 核心机制保留: [Type Harmony Protocol] & [Logical Index Mapping]。
 
 import bpy
 import logging
 import difflib
+import re
+import itertools
 from mathutils import Vector, Euler, Matrix, Color, Quaternion
 
 from . import node_mappings
@@ -26,21 +28,31 @@ class SmartPropertySetter:
     def resolve_prop_name(node, prop_name):
         if hasattr(node, prop_name): return prop_name
             
+        norm_prop = str(prop_name).lower().replace(" ", "").replace("_", "")
+        
+        # 双向语义别名矩阵
         semantic_aliases = {
-            'mode': 'operation',
-            'inputtype': 'data_type', 
-            'domaintype': 'domain'
+            'mode': ['operation'],
+            'operation': ['mode'],
+            'inputtype': ['data_type', 'type'],
+            'datatype': ['input_type', 'type'],
+            'domaintype': ['domain'],
+            'domain': ['domain_type'],
+            'type': ['data_type', 'input_type']
         }
-        norm_prop = TextSmartEngine.clean_for_loose(prop_name)
-        if norm_prop in semantic_aliases and hasattr(node, semantic_aliases[norm_prop]):
-            return semantic_aliases[norm_prop]
+        
+        if norm_prop in semantic_aliases:
+            for alias in semantic_aliases[norm_prop]:
+                if hasattr(node, alias):
+                    return alias
 
         if hasattr(node, "bl_rna"):
             best_match = None
             best_diff = 999
             for rna_key in node.bl_rna.properties.keys():
-                if TextSmartEngine.match_loose(prop_name, rna_key):
-                    diff = abs(len(rna_key) - len(prop_name))
+                norm_rna = str(rna_key).lower().replace(" ", "").replace("_", "")
+                if norm_prop == norm_rna or norm_prop in norm_rna or norm_rna in norm_prop:
+                    diff = abs(len(rna_key) - len(str(prop_name)))
                     if diff < best_diff:
                         best_diff = diff
                         best_match = rna_key
@@ -76,9 +88,28 @@ class SmartPropertySetter:
     @staticmethod
     def _set_enum_smart(node, prop_name, value, rna_prop):
         valid_items = [item.identifier for item in rna_prop.enum_items]
-        if value in valid_items: 
-            setattr(node, prop_name, value); return True
-            
+        val_str = str(value)
+        val_upper = val_str.upper()
+        
+        if val_upper in valid_items: 
+            setattr(node, prop_name, val_upper); return True
+        if val_str in valid_items:
+            setattr(node, prop_name, val_str); return True
+
+        aliases = {
+            "FLOAT_VECTOR": "VECTOR",
+            "FLOAT_COLOR": "COLOR",
+            "RGBA": "COLOR",
+            "BOOL": "BOOLEAN",
+            "BOOLEAN": "BOOL"
+        }
+        if val_upper in aliases:
+            alias_target = aliases[val_upper]
+            if alias_target in valid_items:
+                setattr(node, prop_name, alias_target); return True
+            if val_upper == "VECTOR" and "FLOAT_VECTOR" in valid_items:
+                setattr(node, prop_name, "FLOAT_VECTOR"); return True
+                
         best_match_ident = None
         best_match_score = 0.0
         norm_val = TextSmartEngine.clean_polymorphic(value)
@@ -86,6 +117,14 @@ class SmartPropertySetter:
         for item in rna_prop.enum_items:
             if TextSmartEngine.match_strict(value, item.identifier) or TextSmartEngine.match_strict(value, item.name):
                 setattr(node, prop_name, item.identifier); return True
+            
+            val_tokens = TextSmartEngine.get_tokens(value)
+            ident_tokens = TextSmartEngine.get_tokens(item.identifier)
+            if val_tokens and ident_tokens and (val_tokens.issubset(ident_tokens) or ident_tokens.issubset(val_tokens)):
+                score = 0.8 - (abs(len(val_tokens) - len(ident_tokens)) * 0.1)
+                if score > best_match_score:
+                    best_match_score = score
+                    best_match_ident = item.identifier
                 
             ident_clean = TextSmartEngine.clean_polymorphic(item.identifier)
             name_clean = TextSmartEngine.clean_polymorphic(item.name)
@@ -121,19 +160,37 @@ class SocketResolver:
     @staticmethod
     def resolve_candidates(collection, name_or_ident, index=None, orig_name=None):
         candidates = []
-        
-        if index is not None and 0 <= index < len(collection):
-            candidates.append(collection[index])
-            return SocketResolver._prioritize_active(candidates)
-
-        if not name_or_ident: return candidates
-        name_str = str(name_or_ident).strip()
-
         node = collection[0].node if len(collection) > 0 else None
         is_reroute = node and node.bl_idname == 'NodeReroute'
 
         def is_valid_socket(s):
-            return (s.bl_idname != 'NodeSocketVirtual' or is_reroute) and s not in candidates
+            if s.bl_idname == 'NodeSocketVirtual' and not is_reroute: return False
+            if getattr(s, 'type', '') == 'MENU': return False
+            return s not in candidates
+
+        name_str = str(name_or_ident).strip() if name_or_ident else ""
+
+        if index is not None:
+            target_sock = None
+            logical_sockets = [s for s in collection if is_valid_socket(s)]
+            if 0 <= index < len(logical_sockets):
+                target_sock = logical_sockets[index]
+            elif 0 <= index < len(collection):
+                target_sock = collection[index]
+                
+            if target_sock and is_valid_socket(target_sock):
+                if name_str:
+                    match_name = (target_sock.name == name_str or target_sock.identifier == name_str)
+                    if not match_name:
+                        has_perfect_match = any((s.name == name_str or s.identifier == name_str) and is_valid_socket(s) for s in collection)
+                        if has_perfect_match:
+                            target_sock = None 
+                
+                if target_sock:
+                    candidates.append(target_sock)
+                    return SocketResolver._prioritize_active(candidates)
+
+        if not name_or_ident: return candidates
 
         if node and orig_name:
             is_dynamic = any(x in node.bl_idname for x in ['Group', 'Simulation', 'Repeat', 'Bake', 'Foreach'])
@@ -236,7 +293,7 @@ class NodeRestorer:
             if key not in merged_props:
                 merged_props[key] = value
 
-        priority_keys = ['data_type', 'domain', 'domain_type', 'input_type']
+        priority_keys = ['data_type', 'domain', 'domain_type', 'input_type', 'type']
         for p_key in priority_keys:
             if p_key in merged_props:
                 SmartPropertySetter.set_property(node, p_key, merged_props[p_key])
@@ -303,8 +360,9 @@ class NodeRestorer:
         if node_name and links_data:
             incoming = [l for l in links_data if l.get('to_node') == node_name or l.get('dst') == node_name]
             for link in incoming:
-                t_name = link.get('to_socket') or link.get('dst_sock')
-                t_idx = link.get('to_socket_index') or link.get('dst_idx')
+                t_name = link.get('dst_sock') if link.get('dst_sock') is not None else link.get('to_socket')
+                t_idx = link.get('dst_idx') if link.get('dst_idx') is not None else link.get('to_socket_index')
+                
                 target_sock = NodeRestorer._simulate_link_target(node, t_name, t_idx, will_be_linked)
                 if target_sock:
                     will_be_linked.add(target_sock)
@@ -339,22 +397,44 @@ class NodeRestorer:
             if socket and 'default_value' in s_data:
                 try:
                     val = s_data['default_value']
+                    
                     if socket.bl_idname in {'NodeSocketObject', 'NodeSocketMaterial', 'NodeSocketCollection', 'NodeSocketTexture', 'NodeSocketImage'}:
                         type_map = {'NodeSocketObject': 'objects', 'NodeSocketMaterial': 'materials', 'NodeSocketCollection': 'collections', 'NodeSocketTexture': 'textures', 'NodeSocketImage': 'images'}
                         col = getattr(bpy.data, type_map.get(socket.bl_idname, ''), None)
                         if col and isinstance(val, str): 
                             target = col.get(val)
                             if target: socket.default_value = target
-                    elif socket.bl_idname == 'NodeSocketVector' and isinstance(val, list):
-                        socket.default_value = Vector(val)
-                    elif socket.bl_idname == 'NodeSocketColor' and isinstance(val, list):
-                        if len(val) == 3: val.append(1.0)
-                        socket.default_value = val
-                    elif socket.bl_idname in ('NodeSocketBool', 'NodeSocketBoolean') or socket.type == 'BOOLEAN':
+                            
+                    elif getattr(socket, 'type', '') in {'VECTOR', 'ROTATION'} or 'Vector' in socket.bl_idname:
+                        if isinstance(val, (list, tuple)):
+                            try:
+                                for i in range(min(len(val), len(socket.default_value))):
+                                    socket.default_value[i] = float(val[i])
+                            except TypeError:
+                                socket.default_value = tuple(float(x) for x in val)
+                        else:
+                            socket.default_value = val
+                            
+                    elif getattr(socket, 'type', '') == 'RGBA' or 'Color' in socket.bl_idname:
+                        if isinstance(val, (list, tuple)):
+                            v_list = list(val)
+                            if len(v_list) == 3: v_list.append(1.0)
+                            try:
+                                for i in range(min(len(v_list), len(socket.default_value))):
+                                    socket.default_value[i] = float(v_list[i])
+                            except TypeError:
+                                socket.default_value = tuple(float(x) for x in v_list)
+                        else:
+                            socket.default_value = val
+                            
+                    elif getattr(socket, 'type', '') == 'BOOLEAN' or 'Bool' in socket.bl_idname:
                         socket.default_value = bool(val)
+                        
                     else:
                         socket.default_value = val
-                except: pass
+                        
+                except Exception as e:
+                    logger.warning(f"⚠️ [Data Restore] Failed to set '{socket.name}' default_value to {val}: {e}")
             
             if socket:
                 if 'hide' in s_data: socket.hide = s_data['hide']
@@ -454,7 +534,8 @@ class DeserializationEngine:
                 "Bake" in n.bl_idname or
                 "Foreach" in n.bl_idname or
                 "Mix" in n.bl_idname or
-                "Math" in n.bl_idname
+                "Math" in n.bl_idname or
+                "Switch" in n.bl_idname
                 for n in self.node_map.values()
             )
             
@@ -612,10 +693,89 @@ class DeserializationEngine:
             else: normals.append(n)
         return outputs + normals + frames
 
+    def _global_rescue_node_class(self, raw_idname):
+        """【终极防线】全局异位词重组与活体试探 (Anagram Permutation & Reflection)"""
+        # 1. 突破懒加载陷阱：主动异位词排列试探 (Permutation Trial)
+        # 将 "GeometryNodeCurveFillet" 清洗为前缀和核心词 ("GeometryNode", ["Curve", "Fillet"])
+        parts = re.findall(r'[A-Z]?[a-z]+|[A-Z]+(?=[A-Z][a-z]|\d|\W|$)|\d+', raw_idname)
+        prefix_words = []
+        core_words = []
+        for p in parts:
+            if p.lower() in {'geometry', 'node', 'shader', 'compositor', 'texture', 'function'}:
+                prefix_words.append(p)
+            else:
+                core_words.append(p)
+                
+        # 避免阶乘爆炸，通常核心词组在 2~4 个之间
+        if 0 < len(core_words) <= 4:
+            prefix_str = "".join(prefix_words)
+            if not prefix_str: # 兜底 AI 漏写前缀
+                if self.tree.bl_idname == 'GeometryNodeTree': prefix_str = "GeometryNode"
+                elif self.tree.bl_idname == 'ShaderNodeTree': prefix_str = "ShaderNode"
+                
+            # 生成核心词全排列: (Curve, Fillet) -> (Fillet, Curve) -> "GeometryNodeFilletCurve"
+            for perm in itertools.permutations(core_words):
+                test_id = prefix_str + "".join(perm)
+                if test_id != raw_idname:
+                    try:
+                        # 核心动作：这不仅是验证，更是对底层懒加载机制的强制唤醒！
+                        test_node = self.tree.nodes.new(test_id)
+                        real_id = test_node.bl_idname
+                        self.tree.nodes.remove(test_node) # 试探成功，拔出探针
+                        return real_id
+                    except Exception:
+                        pass
+
+        # 2. 内存反射 Jaccard 兜底 (处理已被加载且拼写有微小差异的节点)
+        all_node_types = set()
+        def _scan_subs(cls):
+            for sub in cls.__subclasses__():
+                if hasattr(sub, 'bl_idname'):
+                    all_node_types.add(sub.bl_idname)
+                _scan_subs(sub)
+        _scan_subs(bpy.types.Node)
+
+        def _tokenize(name):
+            words = re.findall(r'[A-Z]?[a-z]+|[A-Z]+(?=[A-Z][a-z]|\d|\W|$)|\d+', name)
+            ignore = {"geometry", "node", "shader", "compositor", "texture", "function"}
+            stemmed = set()
+            for w in words:
+                wl = w.lower()
+                if wl in ignore: continue
+                if wl.endswith('s') and len(wl) > 3: wl = wl[:-1]
+                stemmed.add(wl)
+            return stemmed
+
+        raw_tokens = _tokenize(raw_idname)
+        best_match = None
+        best_score = 0.0
+        
+        for n_type in all_node_types:
+            type_tokens = _tokenize(n_type)
+            if not raw_tokens or not type_tokens: continue
+            
+            intersection = raw_tokens.intersection(type_tokens)
+            union = raw_tokens.union(type_tokens)
+            jaccard = len(intersection) / len(union) if union else 0.0
+            
+            if jaccard == 1.0: 
+                return n_type
+            
+            seq_score = difflib.SequenceMatcher(None, raw_idname.lower(), n_type.lower()).ratio()
+            score = max(jaccard, seq_score)
+            
+            if score > best_score:
+                best_score = score
+                best_match = n_type
+                
+        if best_score > 0.65:
+            return best_match
+            
+        return None
+
     def _create_node_skeleton(self, n_data, offset):
         raw_idname = n_data.get('bl_idname', 'NodeFrame')
         
-        # 核心逻辑：获取智能队列并依次尝试，实现物理验证
         candidates = node_mappings.resolve_node_idname_candidates(raw_idname)
         
         node = None
@@ -627,8 +787,17 @@ class DeserializationEngine:
                 break
             except:
                 pass
+                
+        # 👑 拦截懒加载陷阱与异位词幻觉
+        if not node:
+            rescued_id = self._global_rescue_node_class(raw_idname)
+            if rescued_id:
+                try:
+                    node = self.tree.nodes.new(rescued_id)
+                    logger.info(f"🦸‍♂️ [Global Rescue] Forged hallucinated class {raw_idname} into {rescued_id}")
+                except Exception as e:
+                    pass
         
-        # 物理锁定报警框：当所有可能性枯竭时
         if not node:
             node = self.tree.nodes.new("NodeFrame")
             node.label = f"MISSING: {raw_idname}"
@@ -637,7 +806,7 @@ class DeserializationEngine:
             n_data['color'] = (1.0, 0.2, 0.2)
             n_data['width'] = 220.0
             n_data['height'] = 100.0
-            logger.warning(f"❌ Failed to create node {raw_idname} after exhausting {len(candidates)} candidates.")
+            logger.warning(f"❌ Failed to create node {raw_idname} after exhausting all rescue protocols.")
         
         orig_name = n_data.get('name')
         if orig_name:
@@ -774,6 +943,58 @@ class DeserializationEngine:
     # 连接恢复器 
     # --------------------------------------------------------------------------
 
+    @staticmethod
+    def _is_type_compatible(sock_a, sock_b):
+        if not sock_a or not sock_b: return False
+        
+        if sock_a.bl_idname == 'NodeSocketVirtual' or sock_b.bl_idname == 'NodeSocketVirtual': return True
+        
+        type_a = getattr(sock_a, 'type', 'CUSTOM')
+        type_b = getattr(sock_b, 'type', 'CUSTOM')
+        
+        if type_a == type_b: return True
+        
+        isolated_types = {'GEOMETRY', 'STRING', 'OBJECT', 'COLLECTION', 'IMAGE', 'TEXTURE', 'MATERIAL'}
+        if type_a in isolated_types or type_b in isolated_types:
+            return False 
+            
+        return True 
+
+    def _enforce_type_harmony(self, src, dst, candidates_src, candidates_dst):
+        from_sock = candidates_src[0] if candidates_src else None
+        to_sock = candidates_dst[0] if candidates_dst else None
+        
+        if from_sock and not to_sock:
+            for d in dst.inputs:
+                if getattr(d, 'enabled', True) and not getattr(d, 'hide', False) and not d.is_linked and self._is_type_compatible(from_sock, d):
+                    logger.info(f"⚡ [Type Harmony] Rescued missing target socket: {src.name}[{from_sock.name}] -> {dst.name}[{d.name}]")
+                    return from_sock, d
+                    
+        if from_sock and to_sock and not self._is_type_compatible(from_sock, to_sock):
+            logger.info(f"⚡ [Type Harmony] Intercepted illegal link: {src.name}[{from_sock.name}] -> {dst.name}[{to_sock.name}]")
+            
+            rescued_from = None
+            rescued_to = None
+            
+            for s in src.outputs:
+                if getattr(s, 'enabled', True) and not getattr(s, 'hide', False) and self._is_type_compatible(s, to_sock):
+                    rescued_from = s
+                    rescued_to = to_sock
+                    break
+                    
+            if not rescued_from:
+                for d in dst.inputs:
+                    if getattr(d, 'enabled', True) and not getattr(d, 'hide', False) and not d.is_linked and self._is_type_compatible(from_sock, d):
+                        rescued_from = from_sock
+                        rescued_to = d
+                        break
+                        
+            if rescued_from and rescued_to:
+                logger.info(f"   [Rescued]: Re-routed to {src.name}[{rescued_from.name}] -> {dst.name}[{rescued_to.name}]")
+                return rescued_from, rescued_to
+                
+        return from_sock, to_sock
+
     def _restore_links(self, links_data):
         if not isinstance(links_data, list): return
         
@@ -784,8 +1005,8 @@ class DeserializationEngine:
         for link in links_data:
             if not isinstance(link, dict): continue
             
-            src_name = link.get('src') or link.get('from_node')
-            dst_name = link.get('dst') or link.get('to_node')
+            src_name = link.get('src') if link.get('src') is not None else link.get('from_node')
+            dst_name = link.get('dst') if link.get('dst') is not None else link.get('to_node')
             
             src = self.node_map.get(src_name)
             if not src and src_name in self.tree.nodes:
@@ -807,13 +1028,14 @@ class DeserializationEngine:
             self._heal_dead_links(dead_links, connected_sources, connected_destinations)
 
     def _create_single_link(self, src, dst, link):
-        from_sock_ident = link.get('src_sock') or link.get('from_socket')
-        to_sock_ident = link.get('dst_sock') or link.get('to_socket')
-        from_idx = link.get('src_idx') or link.get('from_socket_index')
-        to_idx = link.get('dst_idx') or link.get('to_socket_index')
+        from_sock_ident = link.get('src_sock') if link.get('src_sock') is not None else link.get('from_socket')
+        to_sock_ident = link.get('dst_sock') if link.get('dst_sock') is not None else link.get('to_socket')
+        
+        from_idx = link.get('src_idx') if link.get('src_idx') is not None else link.get('from_socket_index')
+        to_idx = link.get('dst_idx') if link.get('dst_idx') is not None else link.get('to_socket_index')
 
-        src_orig_name = link.get('src') or link.get('from_node')
-        dst_orig_name = link.get('dst') or link.get('to_node')
+        src_orig_name = link.get('src') if link.get('src') is not None else link.get('from_node')
+        dst_orig_name = link.get('dst') if link.get('dst') is not None else link.get('to_node')
 
         src_data = self.raw_nodes_map.get(src_orig_name)
         if not src_data: src_data = self.raw_nodes_map.get(src.name, {})
@@ -832,10 +1054,9 @@ class DeserializationEngine:
         to_orig_name = get_orig_name(dst_data, to_sock_ident)
 
         candidates_src = SocketResolver.resolve_candidates(src.outputs, from_sock_ident, from_idx, orig_name=from_orig_name)
-        from_sock = candidates_src[0] if candidates_src else None
-        
         candidates_dst = SocketResolver.resolve_candidates(dst.inputs, to_sock_ident, to_idx, orig_name=to_orig_name)
-        to_sock = candidates_dst[0] if candidates_dst else None
+        
+        from_sock, to_sock = self._enforce_type_harmony(src, dst, candidates_src, candidates_dst)
 
         if not from_sock and len(src.outputs) > 0:
              is_src_reroute = src.bl_idname == 'NodeReroute'
@@ -865,7 +1086,7 @@ class DeserializationEngine:
 
     def _heal_dead_links(self, dead_links, connected_sources, connected_destinations):
         for link in dead_links:
-            dst_name = link.get('dst') or link.get('to_node')
+            dst_name = link.get('dst') if link.get('dst') is not None else link.get('to_node')
             dst = self.node_map.get(dst_name) or self.tree.nodes.get(dst_name)
             if not dst: continue
             
@@ -875,7 +1096,7 @@ class DeserializationEngine:
             best_candidate = None
             best_score = -1
             
-            src_name_hint = link.get('src') or link.get('from_node')
+            src_name_hint = link.get('src') if link.get('src') is not None else link.get('from_node')
             if not src_name_hint: continue
 
             hint_lower = src_name_hint.lower()

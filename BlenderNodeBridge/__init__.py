@@ -8,7 +8,7 @@ bl_info = {
     "author": "Dev_Nodes_V5 & Dev_Analyst",
     "version": (5, 14, 141),
     "blender": (4, 0, 0),
-    "location": "Node Editor > Sidebar > GeoNeural",
+    "location": "Node Editor > Sidebar > BlenderNodeBridge",
     "description": "UI 紧凑版：优化面板间距，提升视觉连贯性。",
     "category": "Node",
 }
@@ -33,12 +33,12 @@ for m in modules_to_reload:
 # ==============================================================================
 
 class GN_PT_MainPanel(bpy.types.Panel):
-    """GeoNeural Bridge 主面板"""
-    bl_label = "GeoNeural Bridge"
+    """BlenderNodeBridge 主面板"""
+    bl_label = "BlenderNodeBridge"
     bl_idname = "GN_PT_main"
     bl_space_type = "NODE_EDITOR"
     bl_region_type = "UI"
-    bl_category = "GeoNeural"
+    bl_category = "BlenderNodeBridge"
 
     def draw(self, context):
         layout = self.layout

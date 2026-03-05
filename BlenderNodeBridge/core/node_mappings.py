@@ -1,8 +1,8 @@
 # core/node_mappings.py
-# BlenderNodeBridge v5.14.141 (Omega Armor - Core Node Injection)
-# 修复: 引入递归子类扫描 _get_all_subclasses，彻底解决 dir(bpy.types) 带来的类名漏算问题。
-# 终极架构: 废弃外部补丁，将“命名空间幻觉救援 (Namespace Rescue)”原生融入智能匹配引擎。
-# 核心修复: 针对 Blender C++ 底层节点 (如 NodeGroupInput) 不暴露类级 bl_idname 的暗坑，引入【核心节点硬注入】与快速通道映射，彻底解决组输入/输出节点的复制粘贴崩溃。
+# BlenderNodeBridge v5.14.151 (Omega Armor - Adaptive Variant Generator)
+# 机制重置: 回滚至 v5.14.141 的纯净活体探测架构，摒弃侵入式的懒加载唤醒与硬编码字典。
+# 文本修复: 修复 strip_blender_api_prefix 中导致驼峰边界丢失的 Bug。
+# 终极架构: [Adaptive Variant Generator] 引入“经验变体生成器”。针对 AI 的命名幻觉与 Blender API 的跨版本分裂，不再依赖字典匹配，而是基于领域经验（噪音词）生成命名变体组合，交由反序列化器的 `nodes.new()` 进行物理验证。实现无视懒加载、无视版本差异的终极兼容。
 
 import bpy
 import difflib
@@ -13,7 +13,7 @@ import re
 # ==============================================================================
 
 def _get_all_subclasses(cls):
-    """递归获取所有深层子类，无死角扫描 Blender 内存，替代不可靠的 dir()"""
+    """递归获取所有深层子类，扫描已加载进内存的 Blender 节点类"""
     all_sub = set()
     stack = [cls]
     while stack:
@@ -31,34 +31,38 @@ def _get_all_subclasses(cls):
 
 class TextSmartEngine:
     @staticmethod
+    def clean_polymorphic(text):
+        """提取词边界，统一转化为 UPPER_SNAKE_CASE，绝不破坏信息熵"""
+        if not text: return ""
+        val_str = str(text)
+        # 正确解析驼峰命名 (e.g. CurveStar -> CURVE_STAR)
+        camel_to_snake = re.sub(r'([a-z])([A-Z])', r'\1_\2', val_str)
+        return camel_to_snake.upper().replace(" ", "_").replace("-", "_")
+
+    @staticmethod
     def strip_blender_api_prefix(text):
-        """动态剥离 Blender 常见的底层 API 前缀/后缀，提取核心语义"""
-        s = str(text).upper()
+        """基于标准化后的字符串，安全剥离无用的 API 前后缀"""
+        s = TextSmartEngine.clean_polymorphic(text)
         prev = ""
         while s != prev:
             prev = s
             s = re.sub(r'^((NODE|SOCKET|GEOMETRY|SHADER|FUNCTION|COMPOSITOR|TEXTURE)_?)+', '', s)
             s = re.sub(r'_?(ITEMS|DATA|TYPE|MODE|OP|OPERATION)$', '', s)
-        return s
-
-    @staticmethod
-    def clean_polymorphic(text):
-        if not text: return ""
-        val_str = str(text)
-        camel_to_snake = re.sub(r'([a-z])([A-Z])', r'\1_\2', val_str)
-        return camel_to_snake.upper().replace(" ", "_").replace("-", "_")
+        return s if s else TextSmartEngine.clean_polymorphic(text)
 
     @staticmethod
     def get_tokens(text):
-        return set([t for t in text.split('_') if t])
+        """利用下划线切分，获取核心语义 Token 集合"""
+        cleaned = TextSmartEngine.strip_blender_api_prefix(text)
+        return set([t for t in cleaned.split('_') if t])
 
     @staticmethod
     def match_strict(target, candidate):
         norm_target = TextSmartEngine.clean_polymorphic(target)
         norm_cand = TextSmartEngine.clean_polymorphic(candidate)
         if norm_target == norm_cand: return True
-        target_tokens = TextSmartEngine.get_tokens(norm_target)
-        cand_tokens = TextSmartEngine.get_tokens(norm_cand)
+        target_tokens = TextSmartEngine.get_tokens(target)
+        cand_tokens = TextSmartEngine.get_tokens(candidate)
         if target_tokens and target_tokens == cand_tokens: return True
         return False
 
@@ -79,8 +83,8 @@ class TextSmartEngine:
         
     @staticmethod
     def match_subset(target, candidate):
-        t_tokens = TextSmartEngine.get_tokens(TextSmartEngine.clean_polymorphic(target))
-        c_tokens = TextSmartEngine.get_tokens(TextSmartEngine.clean_polymorphic(candidate))
+        t_tokens = TextSmartEngine.get_tokens(target)
+        c_tokens = TextSmartEngine.get_tokens(candidate)
         if not t_tokens or not c_tokens: return False
         return t_tokens.issubset(c_tokens) or c_tokens.issubset(t_tokens)
 
@@ -154,8 +158,7 @@ class NodeNameMatcher:
             if hasattr(node_cls, "bl_idname") and node_cls.bl_idname:
                 cls._CLASS_ID_CACHE[node_cls.bl_idname] = node_cls.bl_idname
                 
-        # 【核心漏洞修复】强制注入 Blender C++ 底层静默节点
-        # 这些节点在类定义上没有暴露 bl_idname，导致反射机制漏抓。
+        # 强制注入 Blender C++ 底层静默节点
         core_nodes = ["NodeGroupInput", "NodeGroupOutput", "NodeFrame", "NodeReroute", "NodeCustomGroup"]
         for cn in core_nodes:
             cls._CLASS_ID_CACHE[cn] = cn
@@ -165,15 +168,15 @@ class NodeNameMatcher:
     @classmethod
     def resolve_idname_candidates(cls, fuzzy_name):
         """
-        【Omega 核心】返回所有可能的节点合法 ID 候选队列。
-        从最精确的语义匹配到最极端的盲猜前缀拼接，确保执行器绝对有足够的备选子弹。
+        【Omega 终极架构】返回高优先级候选队列，交由 deserializer 的 `nodes.new()` 物理验证。
+        权重顺序：极速通道 -> 精确实体匹配 -> Difflib纠错 -> 【经验变体生成 (盲区救援)】
         """
         if not fuzzy_name: return ["NodeFrame"]
         if not cls._CACHE_BUILT: cls._build_cache()
         
         candidates = []
         
-        # 0. 极速通道 (常见别名与高频核心节点)
+        # 1. 极速通道 (常见别名与高频核心节点)
         fast_path = {
             "MATH": "ShaderNodeMath", "VECTOR_MATH": "ShaderNodeVectorMath",
             "MIX": "ShaderNodeMix", "BOOLEAN_MATH": "FunctionNodeBooleanMath",
@@ -185,30 +188,18 @@ class NodeNameMatcher:
         if clean_name in fast_path:
             candidates.append(fast_path[clean_name])
             
-        # 1. 严格精确匹配
+        # 2. 严格精确匹配 (内存字典中已存在的)
         if fuzzy_name in cls._CLASS_ID_CACHE and fuzzy_name not in candidates:
             candidates.append(fuzzy_name)
             
         norm_fuzzy = TextSmartEngine.strip_blender_api_prefix(fuzzy_name)
-        prefixes = ['ShaderNode', 'GeometryNode', 'FunctionNode', 'TextureNode', 'CompositorNode']
         
-        # 2. 核心语义精确匹配 (跨域前缀扩展)
+        # 3. 核心语义精确匹配
         matches_exact = [bid for bid in cls._CLASS_ID_CACHE.keys() if norm_fuzzy == TextSmartEngine.strip_blender_api_prefix(bid)]
-        for p in prefixes:
-            for m in matches_exact:
-                if m.startswith(p) and m not in candidates: candidates.append(m)
         for m in matches_exact:
             if m not in candidates: candidates.append(m)
             
-        # 3. Token 子集包含匹配
-        matches_sub = [bid for bid in cls._CLASS_ID_CACHE.keys() if TextSmartEngine.match_subset(fuzzy_name, bid)]
-        for p in prefixes:
-            for m in matches_sub:
-                if m.startswith(p) and m not in candidates: candidates.append(m)
-        for m in matches_sub:
-            if m not in candidates: candidates.append(m)
-            
-        # 4. Difflib 纠错匹配
+        # 4. Difflib 拼写纠错 (针对已缓存的节点)
         core_dict = {}
         for bid in cls._CLASS_ID_CACHE.keys():
             stripped = TextSmartEngine.strip_blender_api_prefix(bid)
@@ -216,21 +207,51 @@ class NodeNameMatcher:
                 core_dict[stripped] = []
             core_dict[stripped].append(bid)
             
-        matches_diff = difflib.get_close_matches(norm_fuzzy, list(core_dict.keys()), n=2, cutoff=0.70)
+        matches_diff = difflib.get_close_matches(norm_fuzzy, list(core_dict.keys()), n=3, cutoff=0.65)
         for diff_val in matches_diff:
             bids = core_dict[diff_val]
-            for p in prefixes:
-                for m in bids:
-                    if m.startswith(p) and m not in candidates: candidates.append(m)
             for m in bids:
                 if m not in candidates: candidates.append(m)
                 
-        # 5. 终极盲区救援 (应对未在缓存中显现的未来版本 API)
-        core_name_raw = re.sub(r'^(ShaderNode|GeometryNode|FunctionNode|TextureNode|CompositorNode|Node)', '', fuzzy_name, flags=re.IGNORECASE)
-        for p in prefixes:
-            blind = p + core_name_raw
-            if blind not in candidates: candidates.append(blind)
+        # 5. Token 子集包含匹配
+        matches_sub = [bid for bid in cls._CLASS_ID_CACHE.keys() if TextSmartEngine.match_subset(fuzzy_name, bid)]
+        for m in matches_sub:
+            if m not in candidates: candidates.append(m)
             
+        # =========================================================================
+        # 6. 【终极盲区救援：经验变体生成器 (Adaptive Variant Generator)】
+        # 当上述字典匹配全部失效（因为节点懒加载，或 API 命名不一致）时启动。
+        # 抛弃查字典，基于行业经验生成可能的名称变体组合，交由 Blender 底层 API 判决。
+        # =========================================================================
+        
+        prefixes = ['GeometryNode', 'ShaderNode', 'FunctionNode', 'TextureNode', 'CompositorNode']
+        
+        # 提取最纯粹的核心词 (例如 GeometryNodeCurvePrimitiveStar -> CurvePrimitiveStar)
+        core_name_raw = re.sub(r'^(ShaderNode|GeometryNode|FunctionNode|TextureNode|CompositorNode|Node)', '', fuzzy_name, flags=re.IGNORECASE)
+        
+        # 建立领域经验噪音词库 (Blender 历代版本中经常被添加或删除的冗余词)
+        noise_words = ['Primitive', 'Legacy', 'Simple', 'Advanced', 'Base', 'Core', 'Math']
+        
+        # 生成变体维度矩阵
+        variants = [core_name_raw]  # 变体1: 原汁原味 (可能 AI 就是对的，比如 CurvePrimitiveCircle)
+        
+        for noise in noise_words:
+            # 变体2: 剔除噪音词 (例如 CurvePrimitiveStar -> CurveStar)
+            # 使用正则忽略大小写，确保不破坏其他大小写结构
+            stripped = re.sub(noise, '', core_name_raw, flags=re.IGNORECASE)
+            if stripped != core_name_raw and stripped not in variants:
+                variants.append(stripped)
+                
+        # 矩阵相乘：变体库 x 前缀库
+        # 将生成的数十种可能性全部压入候选队列。deserializer 会依次执行 tree.nodes.new()
+        # 只要有一条能被 Blender 物理创建成功，就会瞬间完成复原！
+        for v in variants:
+            for p in prefixes:
+                blind_guess = p + v
+                if blind_guess not in candidates: 
+                    candidates.append(blind_guess)
+            
+        # 兜底：AI 的原词
         if fuzzy_name not in candidates:
             candidates.append(fuzzy_name)
             
@@ -248,7 +269,7 @@ def get_api_enum(class_name_or_type):
     return SocketTypeResolver.get_api_enum(class_name_or_type)
 
 def resolve_node_idname_candidates(fuzzy_name):
-    """返回最优备选队列 (List)"""
+    """返回最优备选队列 (List)，包含变体组合"""
     return NodeNameMatcher.resolve_idname_candidates(fuzzy_name)
 
 def resolve_node_idname(fuzzy_name):
