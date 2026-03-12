@@ -1,11 +1,11 @@
 # core/deserializer.py
-# BlenderNodeBridge v5.14.158 (Omega Armor - Permutation Trial)
+# BlenderNodeBridge v5.14.159 (Omega Armor - Context Shield)
 # 机制优化: 增加对 AI 超紧凑 Dict 格式 inputs 的泛化支持。
-# 核心修复: [Permutation Trial] 突破 Blender 懒加载陷阱！在内存反射前，先通过 itertools.permutations 对核心异位词进行物理试探，强行唤醒未加载的类 (如 GeometryNodeFilletCurve)。
+# 核心修复: [Context Shield] 引入跨域侦测协议。当用户将 Shader 贴入 GeoNodes 时，精准拦截无意义的前缀试探，并暴露明确的 "Context Mismatch" 标签，防止误导。
+# 核心修复: [Permutation Trial] 突破 Blender 懒加载陷阱，强行唤醒未加载类。
 # 核心修复: [Global Anagram Rescue] 内存反射 Jaccard 兜底。
-# 核心修复: [Semantic Supremacy] 确立语义绝对优先原则，防范 Index 错位。
+# 核心修复: [Semantic Supremacy] 确立语义绝对优先原则。
 # 核心修复: [Atomic Assignment] 安全分量遍历写入，穿透严格类型检查。
-# 核心机制保留: [Type Harmony Protocol] & [Logical Index Mapping]。
 
 import bpy
 import logging
@@ -30,7 +30,6 @@ class SmartPropertySetter:
             
         norm_prop = str(prop_name).lower().replace(" ", "").replace("_", "")
         
-        # 双向语义别名矩阵
         semantic_aliases = {
             'mode': ['operation'],
             'operation': ['mode'],
@@ -454,9 +453,20 @@ class DeserializationEngine:
         self.raw_nodes_map = {}
         self.deferred_props_map = {}
         self._valid_pairs = set()
+        
+        # 👑 [Context Shield] 跨域上下文侦测
+        self.active_tree_type = tree.bl_idname
+        self.source_tree_type = None 
+        self.is_cross_domain = False
 
     def deserialize_tree(self, json_data, offset=(0,0)):
         if not isinstance(json_data, dict): return []
+        
+        # 初始化跨域状态
+        self.source_tree_type = json_data.get("tree_type", self.active_tree_type)
+        if self.source_tree_type and self.source_tree_type != self.active_tree_type:
+            self.is_cross_domain = True
+            logger.warning(f"⚠️ [Context Mismatch] Pasting {self.source_tree_type} into {self.active_tree_type}!")
         
         nodes_data = json_data.get("nodes", [])
         if not isinstance(nodes_data, list): nodes_data = []
@@ -695,8 +705,7 @@ class DeserializationEngine:
 
     def _global_rescue_node_class(self, raw_idname):
         """【终极防线】全局异位词重组与活体试探 (Anagram Permutation & Reflection)"""
-        # 1. 突破懒加载陷阱：主动异位词排列试探 (Permutation Trial)
-        # 将 "GeometryNodeCurveFillet" 清洗为前缀和核心词 ("GeometryNode", ["Curve", "Fillet"])
+        # 1. 突破懒加载陷阱：主动异位词排列试探
         parts = re.findall(r'[A-Z]?[a-z]+|[A-Z]+(?=[A-Z][a-z]|\d|\W|$)|\d+', raw_idname)
         prefix_words = []
         core_words = []
@@ -706,27 +715,27 @@ class DeserializationEngine:
             else:
                 core_words.append(p)
                 
-        # 避免阶乘爆炸，通常核心词组在 2~4 个之间
+        # 👑 [Context Shield] 跨域保护：禁止盲目替换互斥域前缀
+        is_strictly_exclusive = 'Bsdf' in core_words or 'OutputMaterial' in raw_idname
+        
         if 0 < len(core_words) <= 4:
             prefix_str = "".join(prefix_words)
-            if not prefix_str: # 兜底 AI 漏写前缀
-                if self.tree.bl_idname == 'GeometryNodeTree': prefix_str = "GeometryNode"
-                elif self.tree.bl_idname == 'ShaderNodeTree': prefix_str = "ShaderNode"
+            if not prefix_str and not is_strictly_exclusive: 
+                if self.active_tree_type == 'GeometryNodeTree': prefix_str = "GeometryNode"
+                elif self.active_tree_type == 'ShaderNodeTree': prefix_str = "ShaderNode"
                 
-            # 生成核心词全排列: (Curve, Fillet) -> (Fillet, Curve) -> "GeometryNodeFilletCurve"
             for perm in itertools.permutations(core_words):
                 test_id = prefix_str + "".join(perm)
                 if test_id != raw_idname:
                     try:
-                        # 核心动作：这不仅是验证，更是对底层懒加载机制的强制唤醒！
                         test_node = self.tree.nodes.new(test_id)
                         real_id = test_node.bl_idname
-                        self.tree.nodes.remove(test_node) # 试探成功，拔出探针
+                        self.tree.nodes.remove(test_node) 
                         return real_id
                     except Exception:
                         pass
 
-        # 2. 内存反射 Jaccard 兜底 (处理已被加载且拼写有微小差异的节点)
+        # 2. 内存反射 Jaccard 兜底
         all_node_types = set()
         def _scan_subs(cls):
             for sub in cls.__subclasses__():
@@ -776,6 +785,9 @@ class DeserializationEngine:
     def _create_node_skeleton(self, n_data, offset):
         raw_idname = n_data.get('bl_idname', 'NodeFrame')
         
+        # 截获原始名称，用于精准暴露错误信息
+        original_idname = raw_idname 
+        
         candidates = node_mappings.resolve_node_idname_candidates(raw_idname)
         
         node = None
@@ -788,7 +800,6 @@ class DeserializationEngine:
             except:
                 pass
                 
-        # 👑 拦截懒加载陷阱与异位词幻觉
         if not node:
             rescued_id = self._global_rescue_node_class(raw_idname)
             if rescued_id:
@@ -798,15 +809,19 @@ class DeserializationEngine:
                 except Exception as e:
                     pass
         
+        # 👑 [Context Shield] 针对跨域粘贴的精准失败暴露
         if not node:
             node = self.tree.nodes.new("NodeFrame")
-            node.label = f"MISSING: {raw_idname}"
+            if self.is_cross_domain:
+                node.label = f"MISSING (Context Mismatch): {original_idname}"
+            else:
+                node.label = f"MISSING: {original_idname}"
             n_data['label'] = node.label
             n_data['use_custom_color'] = True
             n_data['color'] = (1.0, 0.2, 0.2)
-            n_data['width'] = 220.0
+            n_data['width'] = 260.0
             n_data['height'] = 100.0
-            logger.warning(f"❌ Failed to create node {raw_idname} after exhausting all rescue protocols.")
+            logger.warning(f"❌ Failed to create node {original_idname} after exhausting all rescue protocols.")
         
         orig_name = n_data.get('name')
         if orig_name:
