@@ -1,9 +1,8 @@
 # core/serializer.py
-# BlenderNodeBridge v5.14.141 (Omega Armor - Index Identity Mapping)
-# 机制优化: 进一步封堵 RNA 属性泄露，彻底过滤 properties 中的 UI 尺寸限界参数和空字符串 label。
-# 架构级强化: 废除硬编码的 if-elif Zone 节点类型判定，引入【万能探针提取器】，实现对未知/未来版本动态节点的自动化数据抓取。
-# 核心修复: 修复精简模式 (Compact Mode) 下，多输入节点(如 Math)的同名插槽因名称碰撞导致 default_value 被误判剥离的 Bug，全面切入物理 Index 映射锚点。
-# 架构: Topology Tracer -> Reroute Bypass -> Data Clean -> Compact Filter -> Output
+# BlenderNodeBridge v5.15.3 (Omega Armor - ID-First Final Edition)
+# 机制优化: [Full Link ID-First] 强制保留并导出插槽底层 physical identifier，根除名称碰撞导致的重连失败。
+# 架构级强化: [Universal Radar] 采用映射字典配合 hasattr 动态抓取，实现 Zone 节点集合的降维打击。
+# 架构底线: [Zero Index Dependency] 剔除一切依赖 Index 判断连通性的逻辑，改用 Identifier 锚定。
 
 import bpy
 import logging
@@ -51,7 +50,7 @@ class DataCleaner:
 # ==============================================================================
 
 class TopologyTracer:
-    """递归图遍历器：负责穿透无意义的转接点，寻找真实的拓扑终点"""
+    """递归图遍历器：负责穿透无意义的转接点 (Reroute)，寻找真实的拓扑终点"""
     @staticmethod
     def get_real_destinations(socket, visited=None):
         if visited is None:
@@ -98,13 +97,8 @@ class CompactFilter:
 
     @staticmethod
     def process_node(node_data):
-        is_frame = node_data.get('bl_idname') == 'NodeFrame'
-        
-        if 'parent' in node_data:
-            del node_data['parent']
-            
-        if node_data.get('label') == "":
-            del node_data['label']
+        if 'parent' in node_data: del node_data['parent']
+        if node_data.get('label') == "": del node_data['label']
             
         for key in list(node_data.keys()):
             if key in CompactFilter.ROOT_BLACKLIST:
@@ -128,7 +122,6 @@ class CompactFilter:
                 if direction == 'outputs' or not node_data[direction]:
                     del node_data[direction]
 
-        # 【泛化清洗协议】不再依赖硬编码字典，只要发现节点属性中有 'items' 结构，统一剥离视觉色块
         for key, val in node_data.items():
             if isinstance(val, dict) and 'items' in val:
                 for item in val['items']:
@@ -140,13 +133,15 @@ class CompactFilter:
     @staticmethod
     def _process_socket(socket_data):
         for key in list(socket_data.keys()):
-            if key in CompactFilter.SOCKET_PROP_BLACKLIST: del socket_data[key]
+            if key in CompactFilter.SOCKET_PROP_BLACKLIST: 
+                del socket_data[key]
             
+        # 👑 [ID 绝对豁免权] 仅当 ID 与 Name 完全相同时，才为了极致精简剔除它，交由反序列化端自我推断
         if socket_data.get('identifier') == socket_data.get('name'):
             del socket_data['identifier']
 
 # ==============================================================================
-# 4. 序列化逻辑
+# 4. 序列化核心引擎
 # ==============================================================================
 
 class SocketSerializer:
@@ -161,7 +156,7 @@ class SocketSerializer:
         bl_idname = SocketSerializer.get_bl_idname(socket)
         data = {
             'name': socket.name,
-            'identifier': getattr(socket, 'identifier', socket.name),
+            'identifier': getattr(socket, 'identifier', socket.name), # 👑 强制捕获底层物理标识符
             'bl_socket_idname': bl_idname,
             'type': getattr(socket, 'type', 'FLOAT'),
             'index': index,
@@ -176,8 +171,7 @@ class SocketSerializer:
             try:
                 val = DataCleaner.clean_data(socket.default_value)
                 if val is not None: data['default_value'] = val
-            except Exception:
-                pass
+            except Exception: pass
         
         if bl_idname == 'NodeSocketBundle' or data['type'] == 'BUNDLE':
             data['is_bundle'] = True
@@ -234,6 +228,7 @@ class NodeSerializer:
 
         data['properties'] = NodeSerializer._serialize_properties(node)
 
+        # 👑 挂载万能探针，无视版本自动提取
         NodeSerializer._radar_extract_collections(node, data)
 
         if node.bl_idname == 'GeometryNodeGroup' and node.node_tree:
@@ -243,7 +238,7 @@ class NodeSerializer:
 
     @staticmethod
     def _radar_extract_collections(node, data):
-        """【万能提取雷达】：无视节点类型，自动探测并提取底层集合数据"""
+        """👑【万能提取雷达】：废除硬编码类型判定，利用内存反射探测提取 Zone/Group 的动态内部集合"""
         radar_map = {
             'state_items': 'simulation_state',
             'repeat_items': 'repeat_state',
@@ -253,12 +248,10 @@ class NodeSerializer:
             'generation_items': 'foreach_generation'
         }
         
-        # 建立数据主权：寻找数据母体 (Output节点优先)
         master_node = node
         if 'Input' in node.bl_idname:
             paired = getattr(node, 'paired_output', None) or getattr(node, 'pair_with_output', None)
-            if paired: 
-                master_node = paired
+            if paired: master_node = paired
 
         for mem_attr, json_key in radar_map.items():
             if hasattr(master_node, mem_attr) and not callable(getattr(master_node, mem_attr)):
@@ -284,20 +277,30 @@ class NodeSerializer:
             identifier = prop.identifier
             if identifier in NodeSerializer.ALWAYS_EXCLUDE: continue
             if prop.is_readonly: continue
+            
             val = getattr(node, identifier)
             if isinstance(val, bpy.types.ColorRamp):
                 props[identifier] = {"__type__": "ColorRamp", "data": DataCleaner.serialize_color_ramp(val)}
                 continue
-            if node.bl_idname == 'GeometryNodeCaptureAttribute' and identifier in {'data_type', 'capture_items'}: continue
+                
+            if node.bl_idname == 'GeometryNodeCaptureAttribute' and identifier in {'data_type', 'capture_items'}: 
+                continue
+                
             clean_val = DataCleaner.clean_data(val)
             if clean_val is not None: props[identifier] = clean_val
         
+        # 兼容旧版 Capture Attribute
         if node.bl_idname == 'GeometryNodeCaptureAttribute' and hasattr(node, 'capture_items'):
             items = []
             for item in node.capture_items:
                 items.append({"name": item.name, "data_type": getattr(item, "data_type", "FLOAT")})
             props["capture_items_data"] = items
+            
         return props
+
+# ==============================================================================
+# 5. 树级执行总线
+# ==============================================================================
 
 class SerializationEngine:
     def __init__(self, tree, context, selected_only=False, compact=False):
@@ -308,11 +311,10 @@ class SerializationEngine:
         
         initial_nodes = [n for n in tree.nodes if n.select] if selected_only else list(tree.nodes)
         self.nodes_to_process = self._ensure_zone_integrity(initial_nodes)
-        
-        # 【架构修复】不再使用 (node_name, socket_name)，切入绝对物理索引 (node_name, socket_index)
         self.connected_sockets = set()
 
     def _ensure_zone_integrity(self, nodes):
+        """确保在选定导出时，Zone 节点的输入和输出被成对打包"""
         final_set = set(nodes)
         processed_ids = {n.as_pointer() for n in nodes}
 
@@ -355,14 +357,21 @@ class SerializationEngine:
                     if link_id not in processed_links:
                         processed_links.add(link_id)
                         
+                        # 👑 [全链路 ID 弹药供给] 核心修复点，输出 ID-First 的精确坐标
                         link_data = {
                             'src': link.from_node.name,
-                            'src_sock': getattr(link.from_socket, 'identifier', link.from_socket.name),
+                            'src_sock': link.from_socket.name,
+                            'src_identifier': getattr(link.from_socket, 'identifier', link.from_socket.name),
                             'dst': dest_sock.node.name,
-                            'dst_sock': getattr(dest_sock, 'identifier', dest_sock.name)
+                            'dst_sock': dest_sock.name,
+                            'dst_identifier': getattr(dest_sock, 'identifier', dest_sock.name)
                         }
                         
-                        if not self.compact:
+                        if self.compact:
+                            if link_data['src_identifier'] == link_data['src_sock']: del link_data['src_identifier']
+                            if link_data['dst_identifier'] == link_data['dst_sock']: del link_data['dst_identifier']
+                        else:
+                            # 非精简模式：保留冗余的 Index 信息作为最底层的 Fallback
                             link_data['from_node'] = link_data.pop('src')
                             link_data['from_socket'] = link_data.pop('src_sock')
                             link_data['from_socket_index'] = self._get_socket_index(link.from_node.outputs, link.from_socket)
@@ -372,13 +381,13 @@ class SerializationEngine:
                         
                         links_data.append(link_data)
                         
-                        # 【核心防线】记录目标的唯一物理索引 Index，彻底杜绝名称碰撞
                         if self.compact:
-                            dest_idx = self._get_socket_index(dest_sock.node.inputs, dest_sock)
-                            self.connected_sockets.add((dest_sock.node.name, dest_idx))
+                            # 👑 绝对禁止使用 Index 记录连通性！强制依赖 Identifier！
+                            dest_ident = getattr(dest_sock, 'identifier', dest_sock.name)
+                            self.connected_sockets.add((dest_sock.node.name, dest_ident))
 
         data = {
-            "version": "v5.14.141 Omega Armor",
+            "version": "v5.15.3 Omega Armor ID-First",
             "tree_type": self.tree.bl_idname,
             "nodes": [],
             "links": links_data,
@@ -390,10 +399,11 @@ class SerializationEngine:
                 node_data = NodeSerializer.serialize(node)
                 if self.compact:
                     node_data = CompactFilter.process_node(node_data)
-                    # 【核心防线】仅当当前插槽的物理 Index 被记录为已连线时，才执行裁剪清空
+                    # 👑 依赖 Identifier 过滤默认值，彻底免疫 Blender 插槽的静默位移
                     if node.bl_idname != 'NodeFrame' and 'inputs' in node_data:
                         for inp in node_data['inputs']:
-                            if (node.name, inp.get('index', -1)) in self.connected_sockets:
+                            sock_ident = inp.get('identifier', inp.get('name'))
+                            if (node.name, sock_ident) in self.connected_sockets:
                                 if 'default_value' in inp: del inp['default_value']
                 data["nodes"].append(node_data)
             except Exception as e:

@@ -1,11 +1,9 @@
 # core/deserializer.py
-# BlenderNodeBridge v5.14.159 (Omega Armor - Context Shield)
-# 机制优化: 增加对 AI 超紧凑 Dict 格式 inputs 的泛化支持。
-# 核心修复: [Context Shield] 引入跨域侦测协议。当用户将 Shader 贴入 GeoNodes 时，精准拦截无意义的前缀试探，并暴露明确的 "Context Mismatch" 标签，防止误导。
-# 核心修复: [Permutation Trial] 突破 Blender 懒加载陷阱，强行唤醒未加载类。
-# 核心修复: [Global Anagram Rescue] 内存反射 Jaccard 兜底。
-# 核心修复: [Semantic Supremacy] 确立语义绝对优先原则。
-# 核心修复: [Atomic Assignment] 安全分量遍历写入，穿透严格类型检查。
+# BlenderNodeBridge v5.15.3 (Omega Armor - ID-First Final Edition)
+# 核心重构: [Full Link ID-First] 重构 SocketResolver，引入 kwargs 强制解耦 explicit_identifier，确立 Priority 0 绝对主权。
+# 核心重构: [Two-Pass Harmony] 废除贪婪劫持，部署 Pass 1 (Exact) & Pass 2 (Compatible) 双通道与双向全局纠偏。
+# 核心保护: [Minimalist Lexical Shield] 零硬编码部署 3 核心锚点护盾，防御跨域伪装入侵。
+# 架构底线: 保留异位词试探、原子化分量写入与活体内存探测。
 
 import bpy
 import logging
@@ -14,13 +12,18 @@ import re
 import itertools
 from mathutils import Vector, Euler, Matrix, Color, Quaternion
 
-from . import node_mappings
-from .node_mappings import TextSmartEngine, SocketTypeResolver
+try:
+    from . import node_mappings
+    from .node_mappings import TextSmartEngine, SocketTypeResolver
+except ImportError:
+    node_mappings = None
+    TextSmartEngine = None
+    SocketTypeResolver = None
 
 logger = logging.getLogger("BlenderNodeBridge.deserializer")
 
 # ==============================================================================
-# 1. 智能属性设置器
+# 1. 智能属性设置器 (Smart Property Setter)
 # ==============================================================================
 
 class SmartPropertySetter:
@@ -31,19 +34,15 @@ class SmartPropertySetter:
         norm_prop = str(prop_name).lower().replace(" ", "").replace("_", "")
         
         semantic_aliases = {
-            'mode': ['operation'],
-            'operation': ['mode'],
-            'inputtype': ['data_type', 'type'],
-            'datatype': ['input_type', 'type'],
-            'domaintype': ['domain'],
-            'domain': ['domain_type'],
+            'mode': ['operation'], 'operation': ['mode'],
+            'inputtype': ['data_type', 'type'], 'datatype': ['input_type', 'type'],
+            'domaintype': ['domain'], 'domain': ['domain_type'],
             'type': ['data_type', 'input_type']
         }
         
         if norm_prop in semantic_aliases:
             for alias in semantic_aliases[norm_prop]:
-                if hasattr(node, alias):
-                    return alias
+                if hasattr(node, alias): return alias
 
         if hasattr(node, "bl_rna"):
             best_match = None
@@ -96,11 +95,8 @@ class SmartPropertySetter:
             setattr(node, prop_name, val_str); return True
 
         aliases = {
-            "FLOAT_VECTOR": "VECTOR",
-            "FLOAT_COLOR": "COLOR",
-            "RGBA": "COLOR",
-            "BOOL": "BOOLEAN",
-            "BOOLEAN": "BOOL"
+            "FLOAT_VECTOR": "VECTOR", "FLOAT_COLOR": "COLOR", 
+            "RGBA": "COLOR", "BOOL": "BOOLEAN", "BOOLEAN": "BOOL"
         }
         if val_upper in aliases:
             alias_target = aliases[val_upper]
@@ -111,22 +107,26 @@ class SmartPropertySetter:
                 
         best_match_ident = None
         best_match_score = 0.0
-        norm_val = TextSmartEngine.clean_polymorphic(value)
+        norm_val = TextSmartEngine.clean_polymorphic(value) if TextSmartEngine else val_upper
 
         for item in rna_prop.enum_items:
-            if TextSmartEngine.match_strict(value, item.identifier) or TextSmartEngine.match_strict(value, item.name):
-                setattr(node, prop_name, item.identifier); return True
-            
-            val_tokens = TextSmartEngine.get_tokens(value)
-            ident_tokens = TextSmartEngine.get_tokens(item.identifier)
-            if val_tokens and ident_tokens and (val_tokens.issubset(ident_tokens) or ident_tokens.issubset(val_tokens)):
-                score = 0.8 - (abs(len(val_tokens) - len(ident_tokens)) * 0.1)
-                if score > best_match_score:
-                    best_match_score = score
-                    best_match_ident = item.identifier
+            if TextSmartEngine:
+                if TextSmartEngine.match_strict(value, item.identifier) or TextSmartEngine.match_strict(value, item.name):
+                    setattr(node, prop_name, item.identifier); return True
                 
-            ident_clean = TextSmartEngine.clean_polymorphic(item.identifier)
-            name_clean = TextSmartEngine.clean_polymorphic(item.name)
+                val_tokens = TextSmartEngine.get_tokens(value)
+                ident_tokens = TextSmartEngine.get_tokens(item.identifier)
+                if val_tokens and ident_tokens and (val_tokens.issubset(ident_tokens) or ident_tokens.issubset(val_tokens)):
+                    score = 0.8 - (abs(len(val_tokens) - len(ident_tokens)) * 0.1)
+                    if score > best_match_score:
+                        best_match_score = score
+                        best_match_ident = item.identifier
+                    
+                ident_clean = TextSmartEngine.clean_polymorphic(item.identifier)
+                name_clean = TextSmartEngine.clean_polymorphic(item.name)
+            else:
+                ident_clean, name_clean = item.identifier.upper(), item.name.upper()
+
             score_ident = difflib.SequenceMatcher(None, norm_val, ident_clean).ratio()
             score_name = difflib.SequenceMatcher(None, norm_val, name_clean).ratio()
             
@@ -142,7 +142,7 @@ class SmartPropertySetter:
 
 
 # ==============================================================================
-# 2. 终极插槽解析引擎
+# 2. 终极插槽解析引擎 (ID-First Protocol)
 # ==============================================================================
 
 class SocketResolver:
@@ -157,7 +157,8 @@ class SocketResolver:
         )
 
     @staticmethod
-    def resolve_candidates(collection, name_or_ident, index=None, orig_name=None):
+    def resolve_candidates(collection, *, explicit_identifier=None, fallback_name=None, index=None, orig_name=None):
+        """👑 [ID-First Protocol] 强制 kwargs 传参，确立 Identifier 为 Priority 0 绝对寻址主权"""
         candidates = []
         node = collection[0].node if len(collection) > 0 else None
         is_reroute = node and node.bl_idname == 'NodeReroute'
@@ -167,30 +168,37 @@ class SocketResolver:
             if getattr(s, 'type', '') == 'MENU': return False
             return s not in candidates
 
-        name_str = str(name_or_ident).strip() if name_or_ident else ""
+        # Priority 0: 物理 Identifier 绝对主权 (命中即阻断)
+        if explicit_identifier:
+            ident_str = str(explicit_identifier).strip()
+            for s in collection:
+                if is_valid_socket(s) and getattr(s, 'identifier', '') == ident_str:
+                    candidates.append(s)
+            if candidates: return SocketResolver._prioritize_active(candidates)
 
+        name_str = str(fallback_name).strip() if fallback_name else ""
+
+        # Priority 1: 物理索引匹配
         if index is not None:
             target_sock = None
             logical_sockets = [s for s in collection if is_valid_socket(s)]
-            if 0 <= index < len(logical_sockets):
-                target_sock = logical_sockets[index]
-            elif 0 <= index < len(collection):
-                target_sock = collection[index]
+            if 0 <= index < len(logical_sockets): target_sock = logical_sockets[index]
+            elif 0 <= index < len(collection): target_sock = collection[index]
                 
             if target_sock and is_valid_socket(target_sock):
                 if name_str:
-                    match_name = (target_sock.name == name_str or target_sock.identifier == name_str)
+                    match_name = (target_sock.name == name_str or getattr(target_sock, 'identifier', '') == name_str)
                     if not match_name:
-                        has_perfect_match = any((s.name == name_str or s.identifier == name_str) and is_valid_socket(s) for s in collection)
-                        if has_perfect_match:
-                            target_sock = None 
+                        has_perfect_match = any((s.name == name_str or getattr(s, 'identifier', '') == name_str) and is_valid_socket(s) for s in collection)
+                        if has_perfect_match: target_sock = None 
                 
                 if target_sock:
                     candidates.append(target_sock)
                     return SocketResolver._prioritize_active(candidates)
 
-        if not name_or_ident: return candidates
+        if not fallback_name: return candidates
 
+        # Priority 2: 动态 Zone 原名匹配
         if node and orig_name:
             is_dynamic = any(x in node.bl_idname for x in ['Group', 'Simulation', 'Repeat', 'Bake', 'Foreach'])
             if is_dynamic:
@@ -200,39 +208,46 @@ class SocketResolver:
                         candidates.append(s)
                 if candidates: return SocketResolver._prioritize_active(candidates)
 
+        # Priority 3: 精确名称匹配
         for s in collection:
-            if (s.identifier == name_str or s.name == name_str) and is_valid_socket(s):
+            if (getattr(s, 'identifier', '') == name_str or s.name == name_str) and is_valid_socket(s):
                 candidates.append(s)
 
         if candidates: return SocketResolver._prioritize_active(candidates)
 
-        for s in collection:
-            if not is_valid_socket(s): continue
-            if (TextSmartEngine.match_loose(name_str, s.name) or 
-                TextSmartEngine.match_loose(name_str, s.identifier) or 
-                TextSmartEngine.match_loose(name_str, getattr(s, 'label', '')) or
-                TextSmartEngine.match_loose(name_str, s.bl_idname)):
-                candidates.append(s)
+        # Priority 4: 启发式模糊探测
+        if TextSmartEngine:
+            for s in collection:
+                if not is_valid_socket(s): continue
+                if (TextSmartEngine.match_loose(name_str, s.name) or 
+                    TextSmartEngine.match_loose(name_str, getattr(s, 'identifier', '')) or 
+                    TextSmartEngine.match_loose(name_str, getattr(s, 'label', '')) or
+                    TextSmartEngine.match_loose(name_str, s.bl_idname)):
+                    candidates.append(s)
 
         if candidates: return SocketResolver._prioritize_active(candidates)
 
+        # Priority 5: ABCD/XYZ 坐标映射
         name_upper = name_str.upper()
         if name_upper in {'A', 'B', 'C', 'D', 'X', 'Y', 'Z'}:
             idx_map = {'A': 0, 'X': 0, 'B': 1, 'Y': 1, 'C': 2, 'Z': 2, 'D': 3}
             valid_sockets = [s for s in collection if is_valid_socket(s) and getattr(s, 'enabled', True)]
-            target_idx = idx_map[name_upper]
+            target_idx = idx_map.get(name_upper, 0)
             if target_idx < len(valid_sockets):
                 candidates.append(valid_sockets[target_idx])
             return candidates
 
-        guessed_type = node_mappings.get_socket_class_name(name_str)
-        if guessed_type:
-            for s in collection:
-                if s.bl_idname == guessed_type and getattr(s, 'enabled', True) and is_valid_socket(s):
-                    candidates.append(s)
+        # Priority 6: 猜测类型兜底
+        if node_mappings:
+            guessed_type = node_mappings.get_socket_class_name(name_str)
+            if guessed_type:
+                for s in collection:
+                    if s.bl_idname == guessed_type and getattr(s, 'enabled', True) and is_valid_socket(s):
+                        candidates.append(s)
                     
         if candidates: return SocketResolver._prioritize_active(candidates)
 
+        # Priority 7: 语义泛化兜底
         generic_terms = {"VALUE", "RESULT", "OUTPUT", "INPUT", "DATA", "ANY", "ATTRIBUTE"}
         if name_upper in generic_terms:
             data_sockets = []
@@ -244,10 +259,8 @@ class SocketResolver:
                     else:
                         data_sockets.append(s)
             
-            if data_sockets:
-                candidates.extend(data_sockets)
-            else:
-                candidates.extend(geo_sockets)
+            if data_sockets: candidates.extend(data_sockets)
+            else: candidates.extend(geo_sockets)
 
         return SocketResolver._prioritize_active(candidates)
 
@@ -332,7 +345,8 @@ class NodeRestorer:
 
     @staticmethod
     def _simulate_link_target(node, target_name, target_index, will_be_linked):
-        candidates = SocketResolver.resolve_candidates(node.inputs, target_name, target_index)
+        # 👑 [API Sync] 强制 Kwargs 避免错位
+        candidates = SocketResolver.resolve_candidates(node.inputs, explicit_identifier=None, fallback_name=target_name, index=target_index)
         sock = candidates[0] if candidates else None
         
         if sock and sock in will_be_linked and target_index is None:
@@ -379,8 +393,8 @@ class NodeRestorer:
             ident = s_data.get('identifier')
             name = s_data.get('name')
             
-            name_or_ident = ident or name
-            candidates = SocketResolver.resolve_candidates(node.inputs, name_or_ident, idx, orig_name=name)
+            # 👑 [API Sync] 解耦调用
+            candidates = SocketResolver.resolve_candidates(node.inputs, explicit_identifier=ident, fallback_name=name, index=idx)
             
             socket = None
             avail = [s for s in candidates if s not in will_be_linked and s not in assigned_sockets]
@@ -405,6 +419,7 @@ class NodeRestorer:
                             if target: socket.default_value = target
                             
                     elif getattr(socket, 'type', '') in {'VECTOR', 'ROTATION'} or 'Vector' in socket.bl_idname:
+                        # 👑 [Atomic Assignment] 原子化分量写入，穿透 Blender 5.1 类型检查
                         if isinstance(val, (list, tuple)):
                             try:
                                 for i in range(min(len(val), len(socket.default_value))):
@@ -415,6 +430,7 @@ class NodeRestorer:
                             socket.default_value = val
                             
                     elif getattr(socket, 'type', '') == 'RGBA' or 'Color' in socket.bl_idname:
+                        # 👑 [Atomic Assignment] 
                         if isinstance(val, (list, tuple)):
                             v_list = list(val)
                             if len(v_list) == 3: v_list.append(1.0)
@@ -454,7 +470,6 @@ class DeserializationEngine:
         self.deferred_props_map = {}
         self._valid_pairs = set()
         
-        # 👑 [Context Shield] 跨域上下文侦测
         self.active_tree_type = tree.bl_idname
         self.source_tree_type = None 
         self.is_cross_domain = False
@@ -462,7 +477,6 @@ class DeserializationEngine:
     def deserialize_tree(self, json_data, offset=(0,0)):
         if not isinstance(json_data, dict): return []
         
-        # 初始化跨域状态
         self.source_tree_type = json_data.get("tree_type", self.active_tree_type)
         if self.source_tree_type and self.source_tree_type != self.active_tree_type:
             self.is_cross_domain = True
@@ -581,7 +595,7 @@ class DeserializationEngine:
                         in_nodes[i].pair_with_output(out_nodes[i])
                         self._valid_pairs.add(in_nodes[i].name)
                         self._valid_pairs.add(out_nodes[i].name)
-                except Exception as e: pass
+                except Exception: pass
 
     def _propagate_attributes(self, source_node, props_dict):
         partner = getattr(source_node, "paired_output", None)
@@ -704,8 +718,7 @@ class DeserializationEngine:
         return outputs + normals + frames
 
     def _global_rescue_node_class(self, raw_idname):
-        """【终极防线】全局异位词重组与活体试探 (Anagram Permutation & Reflection)"""
-        # 1. 突破懒加载陷阱：主动异位词排列试探
+        """👑 [Permutation Trial] 异位词试探，唤醒懒加载的底层 C++ 内存"""
         parts = re.findall(r'[A-Z]?[a-z]+|[A-Z]+(?=[A-Z][a-z]|\d|\W|$)|\d+', raw_idname)
         prefix_words = []
         core_words = []
@@ -715,7 +728,6 @@ class DeserializationEngine:
             else:
                 core_words.append(p)
                 
-        # 👑 [Context Shield] 跨域保护：禁止盲目替换互斥域前缀
         is_strictly_exclusive = 'Bsdf' in core_words or 'OutputMaterial' in raw_idname
         
         if 0 < len(core_words) <= 4:
@@ -735,7 +747,6 @@ class DeserializationEngine:
                     except Exception:
                         pass
 
-        # 2. 内存反射 Jaccard 兜底
         all_node_types = set()
         def _scan_subs(cls):
             for sub in cls.__subclasses__():
@@ -784,32 +795,40 @@ class DeserializationEngine:
 
     def _create_node_skeleton(self, n_data, offset):
         raw_idname = n_data.get('bl_idname', 'NodeFrame')
-        
-        # 截获原始名称，用于精准暴露错误信息
         original_idname = raw_idname 
         
-        candidates = node_mappings.resolve_node_idname_candidates(raw_idname)
+        # 👑 [Minimalist Context Shield] 极简词法自证 (Zero-Hardcoding 严守)
+        is_blocked = False
+        raw_lower = raw_idname.lower()
+        if self.active_tree_type == 'GeometryNodeTree':
+            # 严格限制为极简的 3 个绝对排异锚点词汇，拦截伪装
+            if any(anchor in raw_lower for anchor in {'bsdf', 'principled', 'materialoutput'}):
+                is_blocked = True
+                self.is_cross_domain = True
+                logger.warning(f"🛡️ [Context Shield] Intercepted disguised shader node in GeoNodes: {original_idname}")
+            
+        candidates = node_mappings.resolve_node_idname_candidates(raw_idname) if node_mappings else [raw_idname]
         
         node = None
-        for test_id in candidates:
-            try:
-                node = self.tree.nodes.new(test_id)
-                if test_id != raw_idname and test_id != candidates[0]:
-                    logger.info(f"⚡ [Armor Rebuild] Rescued namespace hallucination: {raw_idname} -> {test_id}")
-                break
-            except:
-                pass
-                
-        if not node:
-            rescued_id = self._global_rescue_node_class(raw_idname)
-            if rescued_id:
+        if not is_blocked:
+            for test_id in candidates:
                 try:
-                    node = self.tree.nodes.new(rescued_id)
-                    logger.info(f"🦸‍♂️ [Global Rescue] Forged hallucinated class {raw_idname} into {rescued_id}")
-                except Exception as e:
+                    node = self.tree.nodes.new(test_id)
+                    if test_id != raw_idname and test_id != candidates[0]:
+                        logger.info(f"⚡ [Armor Rebuild] Rescued namespace hallucination: {raw_idname} -> {test_id}")
+                    break
+                except:
                     pass
+                    
+            if not node:
+                rescued_id = self._global_rescue_node_class(raw_idname)
+                if rescued_id:
+                    try:
+                        node = self.tree.nodes.new(rescued_id)
+                        logger.info(f"🦸‍♂️ [Global Rescue] Forged hallucinated class {raw_idname} into {rescued_id}")
+                    except Exception:
+                        pass
         
-        # 👑 [Context Shield] 针对跨域粘贴的精准失败暴露
         if not node:
             node = self.tree.nodes.new("NodeFrame")
             if self.is_cross_domain:
@@ -821,7 +840,8 @@ class DeserializationEngine:
             n_data['color'] = (1.0, 0.2, 0.2)
             n_data['width'] = 260.0
             n_data['height'] = 100.0
-            logger.warning(f"❌ Failed to create node {original_idname} after exhausting all rescue protocols.")
+            if not is_blocked:
+                logger.warning(f"❌ Failed to create node {original_idname} after exhausting all rescue protocols.")
         
         orig_name = n_data.get('name')
         if orig_name:
@@ -924,7 +944,7 @@ class DeserializationEngine:
             self._robust_new_item(collection, raw_type, name)
 
     def _robust_new_item(self, collection, raw_type, name):
-        api_type = node_mappings.get_api_enum(raw_type)
+        api_type = node_mappings.get_api_enum(raw_type) if node_mappings else "FLOAT"
         fallbacks = [api_type]
         
         target_upper = str(raw_type).upper()
@@ -945,23 +965,21 @@ class DeserializationEngine:
                 pass
         return None
 
-    def _adapt_legacy_capture_node(self, node, data_type_str):
-        try:
-            try: node.capture_items.clear()
-            except: pass
-            
-            api_type = node_mappings.get_api_enum(data_type_str)
-            self._robust_new_item(node.capture_items, api_type, "Attribute")
-        except: pass
-
     # --------------------------------------------------------------------------
-    # 连接恢复器 
+    # 连接恢复器 (Link Restorer & Harmony Protocol)
     # --------------------------------------------------------------------------
 
     @staticmethod
-    def _is_type_compatible(sock_a, sock_b):
+    def _is_type_exact(sock_a, sock_b):
+        """Pass 1: 绝对类型对齐探测"""
         if not sock_a or not sock_b: return False
-        
+        if sock_a.bl_idname == 'NodeSocketVirtual' or sock_b.bl_idname == 'NodeSocketVirtual': return True
+        return getattr(sock_a, 'type', 'CUSTOM_A') == getattr(sock_b, 'type', 'CUSTOM_B')
+
+    @staticmethod
+    def _is_type_compatible(sock_a, sock_b):
+        """Pass 2: 隐式降级兼容探测"""
+        if not sock_a or not sock_b: return False
         if sock_a.bl_idname == 'NodeSocketVirtual' or sock_b.bl_idname == 'NodeSocketVirtual': return True
         
         type_a = getattr(sock_a, 'type', 'CUSTOM')
@@ -976,35 +994,48 @@ class DeserializationEngine:
         return True 
 
     def _enforce_type_harmony(self, src, dst, candidates_src, candidates_dst):
+        """👑 [Two-Pass Harmony Protocol] 完整版双通道类型纠偏，包含双向全局救援与探针追踪"""
         from_sock = candidates_src[0] if candidates_src else None
         to_sock = candidates_dst[0] if candidates_dst else None
         
+        # 情景 1：目标插槽丢失
         if from_sock and not to_sock:
+            # Pass 1: 绝对对齐
             for d in dst.inputs:
-                if getattr(d, 'enabled', True) and not getattr(d, 'hide', False) and not d.is_linked and self._is_type_compatible(from_sock, d):
-                    logger.info(f"⚡ [Type Harmony] Rescued missing target socket: {src.name}[{from_sock.name}] -> {dst.name}[{d.name}]")
+                if getattr(d, 'enabled', True) and not getattr(d, 'hide', False) and not d.is_linked and self._is_type_exact(from_sock, d): 
+                    logger.info(f"⚡ [Type Harmony Pass 1] Perfect match found: {dst.name}[{d.name}]")
+                    return from_sock, d
+            # Pass 2: 降级兼容兜底
+            for d in dst.inputs:
+                if getattr(d, 'enabled', True) and not getattr(d, 'hide', False) and not d.is_linked and self._is_type_compatible(from_sock, d): 
+                    logger.info(f"⚡ [Type Harmony Pass 2] Compatible fallback: {dst.name}[{d.name}]")
                     return from_sock, d
                     
+        # 情景 2：非法连线（贪婪劫持发生）
         if from_sock and to_sock and not self._is_type_compatible(from_sock, to_sock):
             logger.info(f"⚡ [Type Harmony] Intercepted illegal link: {src.name}[{from_sock.name}] -> {dst.name}[{to_sock.name}]")
+            rescued_from, rescued_to = None, None
             
-            rescued_from = None
-            rescued_to = None
-            
+            # Pass 1 双向全局重试
             for s in src.outputs:
-                if getattr(s, 'enabled', True) and not getattr(s, 'hide', False) and self._is_type_compatible(s, to_sock):
-                    rescued_from = s
-                    rescued_to = to_sock
-                    break
-                    
+                if getattr(s, 'enabled', True) and not getattr(s, 'hide', False) and self._is_type_exact(s, to_sock):
+                    rescued_from, rescued_to = s, to_sock; break
+            if not rescued_from:
+                for d in dst.inputs:
+                    if getattr(d, 'enabled', True) and not getattr(d, 'hide', False) and not d.is_linked and self._is_type_exact(from_sock, d):
+                        rescued_from, rescued_to = from_sock, d; break
+            
+            # Pass 2 双向全局重试
+            if not rescued_from:
+                for s in src.outputs:
+                    if getattr(s, 'enabled', True) and not getattr(s, 'hide', False) and self._is_type_compatible(s, to_sock):
+                        rescued_from, rescued_to = s, to_sock; break
             if not rescued_from:
                 for d in dst.inputs:
                     if getattr(d, 'enabled', True) and not getattr(d, 'hide', False) and not d.is_linked and self._is_type_compatible(from_sock, d):
-                        rescued_from = from_sock
-                        rescued_to = d
-                        break
-                        
-            if rescued_from and rescued_to:
+                        rescued_from, rescued_to = from_sock, d; break
+            
+            if rescued_from and rescued_to: 
                 logger.info(f"   [Rescued]: Re-routed to {src.name}[{rescued_from.name}] -> {dst.name}[{rescued_to.name}]")
                 return rescued_from, rescued_to
                 
@@ -1043,8 +1074,12 @@ class DeserializationEngine:
             self._heal_dead_links(dead_links, connected_sources, connected_destinations)
 
     def _create_single_link(self, src, dst, link):
-        from_sock_ident = link.get('src_sock') if link.get('src_sock') is not None else link.get('from_socket')
-        to_sock_ident = link.get('dst_sock') if link.get('dst_sock') is not None else link.get('to_socket')
+        # 👑 [ID-First] 正确提取物理 Identifier
+        src_ident = link.get('src_identifier')
+        dst_ident = link.get('dst_identifier')
+
+        from_sock_fallback = link.get('src_sock') if link.get('src_sock') is not None else link.get('from_socket')
+        to_sock_fallback = link.get('dst_sock') if link.get('dst_sock') is not None else link.get('to_socket')
         
         from_idx = link.get('src_idx') if link.get('src_idx') is not None else link.get('from_socket_index')
         to_idx = link.get('dst_idx') if link.get('dst_idx') is not None else link.get('to_socket_index')
@@ -1058,18 +1093,21 @@ class DeserializationEngine:
         dst_data = self.raw_nodes_map.get(dst_orig_name)
         if not dst_data: dst_data = self.raw_nodes_map.get(dst.name, {})
         
-        def get_orig_name(node_data, ident):
+        def get_orig_name(node_data, ident, fallback_name):
             if not node_data: return None
             for s in node_data.get('outputs', []) + node_data.get('inputs', []):
-                if s.get('identifier') == ident:
+                if ident and s.get('identifier') == ident:
+                    return s.get('name')
+                if fallback_name and s.get('name') == fallback_name:
                     return s.get('name')
             return None
 
-        from_orig_name = get_orig_name(src_data, from_sock_ident)
-        to_orig_name = get_orig_name(dst_data, to_sock_ident)
+        from_orig_name = get_orig_name(src_data, src_ident, from_sock_fallback)
+        to_orig_name = get_orig_name(dst_data, dst_ident, to_sock_fallback)
 
-        candidates_src = SocketResolver.resolve_candidates(src.outputs, from_sock_ident, from_idx, orig_name=from_orig_name)
-        candidates_dst = SocketResolver.resolve_candidates(dst.inputs, to_sock_ident, to_idx, orig_name=to_orig_name)
+        # 👑 携带显式 Kwargs ID 传入 SocketResolver
+        candidates_src = SocketResolver.resolve_candidates(src.outputs, explicit_identifier=src_ident, fallback_name=from_sock_fallback, index=from_idx, orig_name=from_orig_name)
+        candidates_dst = SocketResolver.resolve_candidates(dst.inputs, explicit_identifier=dst_ident, fallback_name=to_sock_fallback, index=to_idx, orig_name=to_orig_name)
         
         from_sock, to_sock = self._enforce_type_harmony(src, dst, candidates_src, candidates_dst)
 
@@ -1087,7 +1125,7 @@ class DeserializationEngine:
 
         if not to_sock and "Simulation" in dst.bl_idname:
             logger.warning(f"❌ [Link-Trace] Failed to find target socket on {dst.name}")
-            logger.warning(f"   Target: '{to_sock_ident}' (Index: {to_idx})")
+            logger.warning(f"   Target: '{to_sock_fallback}' (Index: {to_idx})")
             logger.warning(f"   Available Sockets: {[s.name for s in dst.inputs]}")
 
         if from_sock and to_sock:
