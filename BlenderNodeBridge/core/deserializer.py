@@ -1,9 +1,9 @@
 # core/deserializer.py
-# BlenderNodeBridge v5.15.3 (Omega Armor - ID-First Final Edition)
+# BlenderNodeBridge v5.15.4 (Omega Armor - Anti-Index Hijack Edition)
 # 核心重构: [Full Link ID-First] 重构 SocketResolver，引入 kwargs 强制解耦 explicit_identifier，确立 Priority 0 绝对主权。
 # 核心重构: [Two-Pass Harmony] 废除贪婪劫持，部署 Pass 1 (Exact) & Pass 2 (Compatible) 双通道与双向全局纠偏。
 # 核心保护: [Minimalist Lexical Shield] 零硬编码部署 3 核心锚点护盾，防御跨域伪装入侵。
-# 架构底线: 保留异位词试探、原子化分量写入与活体内存探测。
+# 致命修复: [Anti-Index Hijack] 强化 Priority 1，抵御多态节点（如 Mix Node）中同名废弃插槽引起的索引劫持与幽灵连线。
 
 import bpy
 import logging
@@ -178,7 +178,7 @@ class SocketResolver:
 
         name_str = str(fallback_name).strip() if fallback_name else ""
 
-        # Priority 1: 物理索引匹配
+        # Priority 1: 物理索引匹配 (👑 强化版防劫持)
         if index is not None:
             target_sock = None
             logical_sockets = [s for s in collection if is_valid_socket(s)]
@@ -188,9 +188,19 @@ class SocketResolver:
             if target_sock and is_valid_socket(target_sock):
                 if name_str:
                     match_name = (target_sock.name == name_str or getattr(target_sock, 'identifier', '') == name_str)
-                    if not match_name:
-                        has_perfect_match = any((s.name == name_str or getattr(s, 'identifier', '') == name_str) and is_valid_socket(s) for s in collection)
-                        if has_perfect_match: target_sock = None 
+                    
+                    # 👑 [Anti-Index Hijack] 识别并抵抗同名失活插槽（死脉）对 Index 0/1/2 的窃取
+                    is_sock_disabled = not getattr(target_sock, 'enabled', True) or getattr(target_sock, 'hide', False)
+                    has_active_perfect_match = any(
+                        (s.name == name_str or getattr(s, 'identifier', '') == name_str) 
+                        and is_valid_socket(s) 
+                        and getattr(s, 'enabled', True) 
+                        and not getattr(s, 'hide', False)
+                        for s in collection
+                    )
+                    
+                    if not match_name or (is_sock_disabled and has_active_perfect_match):
+                        target_sock = None # 剥夺其索引合法性，强制后续流程走 Priority 3 名称匹配寻回活体
                 
                 if target_sock:
                     candidates.append(target_sock)

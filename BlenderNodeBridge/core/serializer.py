@@ -1,5 +1,6 @@
 # core/serializer.py
-# BlenderNodeBridge v5.15.3 (Omega Armor - ID-First Final Edition)
+# BlenderNodeBridge v5.15.4 (Omega Armor - WYSIWYG Link Filter)
+# 致命修复: [WYSIWYG Protocol] 增加活体端点检测，拦截并丢弃连接在失活插槽 (enabled=False) 上的幽灵连线 (Zombie Links)。
 # 机制优化: [Full Link ID-First] 强制保留并导出插槽底层 physical identifier，根除名称碰撞导致的重连失败。
 # 架构级强化: [Universal Radar] 采用映射字典配合 hasattr 动态抓取，实现 Zone 节点集合的降维打击。
 # 架构底线: [Zero Index Dependency] 剔除一切依赖 Index 判断连通性的逻辑，改用 Identifier 锚定。
@@ -337,6 +338,16 @@ class SerializationEngine:
 
         return list(final_set)
 
+    def _is_socket_alive(self, sock):
+        """👑 [WYSIWYG Protocol] 检测插槽是否处于真正的激活状态，拦截底层幽灵连线"""
+        if hasattr(sock, "is_unavailable") and sock.is_unavailable:
+            return False
+        # Mix Node 切换类型后，废弃插槽的 enabled 会变为 False
+        if hasattr(sock, "enabled") and not sock.enabled:
+            return False
+        # 注意：绝不能检查 .hide！因为用户手动 Ctrl+H 折叠已连接的插槽是合法的操作
+        return True
+
     def execute(self):
         real_nodes_to_process = [n for n in self.nodes_to_process if n.bl_idname != 'NodeReroute']
         node_names = {n.name for n in real_nodes_to_process}
@@ -348,10 +359,18 @@ class SerializationEngine:
             if link.from_node.bl_idname == 'NodeReroute' or link.from_node.name not in node_names:
                 continue
                 
+            # 👑 [WYSIWYG Filtering] 源插槽死脉拦截
+            if not self._is_socket_alive(link.from_socket):
+                continue
+                
             real_dests = TopologyTracer.get_real_destinations(link.to_socket)
             
             for dest_sock in real_dests:
                 if dest_sock.node.name in node_names:
+                    # 👑 [WYSIWYG Filtering] 目标插槽死脉拦截
+                    if not self._is_socket_alive(dest_sock):
+                        continue
+                        
                     link_id = (link.from_socket.as_pointer(), dest_sock.as_pointer())
                     
                     if link_id not in processed_links:
@@ -387,7 +406,7 @@ class SerializationEngine:
                             self.connected_sockets.add((dest_sock.node.name, dest_ident))
 
         data = {
-            "version": "v5.15.3 Omega Armor ID-First",
+            "version": "v5.15.4 Omega Armor WYSIWYG Filter",
             "tree_type": self.tree.bl_idname,
             "nodes": [],
             "links": links_data,
